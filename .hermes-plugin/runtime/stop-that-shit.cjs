@@ -1539,7 +1539,7 @@ module.exports = { readRuntime, recordDecision };
 "package.json": function(module, exports, __require) {
 module.exports = {
   "name": "stop-that-shit",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "Keep agent work bounded and reduce defensive wording in Codex, Claude Code, OpenCode, Hermes Agent CLI, Pi, and Oh My Pi",
   "keywords": [
@@ -1599,7 +1599,8 @@ module.exports = {
     "eval:host-smoke": "node scripts/run-paired-eval.cjs --host-smoke --runs 1",
     "release:check": "npm run schema:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs",
-    "test:omp": "node --test test/omp-adapter.test.cjs test/omp-extension.test.cjs test/omp-package.test.cjs"
+    "test:omp": "node --test test/omp-adapter.test.cjs test/omp-extension.test.cjs test/omp-package.test.cjs",
+    "test:hosts": "node scripts/test-hosts.cjs"
   },
   "engines": {
     "node": ">=18",
@@ -2926,7 +2927,7 @@ module.exports = { optionalIdentifier, readAsyncLaunched };
 };
 __modules["package.json"] = function(module) { module.exports = {
   "name": "stop-that-shit",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "private": true,
   "description": "Keep agent work bounded and reduce defensive wording in Codex, Claude Code, OpenCode, Hermes Agent CLI, Pi, and Oh My Pi",
   "keywords": [
@@ -2986,7 +2987,8 @@ __modules["package.json"] = function(module) { module.exports = {
     "eval:host-smoke": "node scripts/run-paired-eval.cjs --host-smoke --runs 1",
     "release:check": "npm run schema:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs",
-    "test:omp": "node --test test/omp-adapter.test.cjs test/omp-extension.test.cjs test/omp-package.test.cjs"
+    "test:omp": "node --test test/omp-adapter.test.cjs test/omp-extension.test.cjs test/omp-package.test.cjs",
+    "test:hosts": "node scripts/test-hosts.cjs"
   },
   "engines": {
     "node": ">=18",

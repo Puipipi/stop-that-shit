@@ -43,7 +43,7 @@ general improvement in model behavior.
 2. Run these commands one at a time:
 
    ```powershell
-   codex plugin marketplace add lennney/stop-that-shit --ref 0.2.4
+   codex plugin marketplace add lennney/stop-that-shit --ref 0.2.5
    codex plugin add stop-that-shit@stop-that-shit
    ```
 
@@ -98,10 +98,10 @@ Extension and `stop-that-shit` Skill are listed, then invoke
 `/skill:stop-that-shit review -- ...` or the host-neutral directive. Do not
 claim that the optional `subagent` child processes inherit the root contract.
 
-## Oh My Pi (unreleased candidate)
+## Oh My Pi
 
-Use OMP `18.4.4` for the checked baseline. STS `0.2.4` does not include this
-adapter. From a checkout or extracted candidate package, start OMP with its
+Use OMP `18.4.4` for the checked baseline. STS `0.2.5` includes this adapter.
+From the tagged checkout or extracted release package, start OMP with its
 explicit Extension and Skills paths:
 
 ```bash
@@ -116,7 +116,7 @@ emit OMP's `input` event; do not parse their body as authorization. Native CLI/R
 and child-executor effects were checked with a deterministic local provider.
 Interactive TUI checks also passed the tested control and task paths with a
 deterministic local provider. Git-source installation remains unverified.
-See [INSTALL.md](INSTALL.md#oh-my-pi-unreleased-candidate).
+See [INSTALL.md](INSTALL.md#oh-my-pi).
 
 ## Smoke test
 
@@ -144,7 +144,7 @@ general improvement in model behavior.
 If the user does not want Hooks, install the advisory Skill instead:
 
 ```text
-$skill-installer Install stop-that-shit from https://github.com/lennney/stop-that-shit/tree/0.2.4/skills/stop-that-shit
+$skill-installer Install stop-that-shit from https://github.com/lennney/stop-that-shit/tree/0.2.5/skills/stop-that-shit
 ```
 
 If the user asks for only Stop That Shit Slop, run this from the tagged checkout:

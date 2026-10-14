@@ -2,6 +2,8 @@
 
 ## Unreleased / 未发布
 
+## 0.2.5 — Release candidate / 发布候选
+
 - 对后置且未引用的独立指令返回 `DIRECTIVE_NOT_ARMED` 提示；Codex 同时
   显示 systemMessage。保留首行授权边界，不从附件内容推断新权限。
   / Report a standalone directive that follows other prompt content without
@@ -12,10 +14,10 @@
   / Extend STSS to articles, captions, and drafting. Judge defensive wording
   by its use to the reader, preserving meaningful conditions and attribution.
   Add two paired case families in Chinese and English with fixed-response tests.
-- 新增 OMP 独立 Extension 候选，支持原生 `/sts` 控制入口与子任务预算，
+- 新增 OMP 独立 Extension，支持原生 `/sts` 控制入口与子任务预算，
   并通过共享控制器记录父关联恢复决策。公开 0.2.4 不包含此适配。
   / Add a separate OMP Extension with native `/sts` commands, task budgets,
-  and audited parent-link recovery. Published 0.2.4 does not include it.
+  and audited parent-link recovery. Included in 0.2.5; absent from published 0.2.4.
 - 修复重复执行 ID 绕过并发预算、损坏账本归零和依赖段落变更漏判。
   / Reject reused execution IDs, preserve ambiguous lifecycle capacity,
   validate saved state, and detect dependency section changes.
@@ -24,6 +26,25 @@
   / Preserve existing change authority for Chinese observation objects.
   Standalone read-only instructions still apply; embedded heartbeat directives
   do not grant authority.
+
+- OpenCode 失败输入可重试，旧消息重试不再恢复过期权限；保留既有 plan/build 行为。
+  / Retry failed OpenCode inputs without restoring stale authority.
+- 保留损坏旧锁和已有状态，修复失败写入清理；共享 shell/hash 分类与依赖表判断。
+  / Preserve damaged legacy locks and saved state, clean failed writes, and
+  share shell/hash classification and dependency-table analysis.
+- 流式读取 runtime JSONL，普通工具回执跳过不必要的状态更新。
+  / Stream runtime JSONL reads and skip ordinary results before state updates.
+- 修复 CLI 缺失参数、评估变更路径检查和发布文本隐私扫描；自动发现测试文件，
+  统一本地与 CI 检查，并提供要求两个宿主的 `test:hosts` 命令。
+  / Validate CLI arguments and evaluation paths, scan shipped text formats,
+  discover test suites, and provide the required two-host acceptance command.
+- 更新 OpenCode schema 到 2.0.26，保留 Effect 4.0.0-rc.112；重建 Hermes runtime。
+  更新 CI 与扫描器 Action 的固定 SHA。
+  / Update OpenCode schema to 2.0.26, retain Effect 4.0.0-rc.112, regenerate
+  Hermes, and update pinned CI/scanner Actions.
+
+This is a prepared candidate, not a published release. Validation is recorded
+in [EVIDENCE.md](EVIDENCE.md). No new model-effectiveness claim is made.
 
 ## 0.2.4 — 2026-09-28 (OpenCode V1/V2 compatibility / 双版本兼容)
 
