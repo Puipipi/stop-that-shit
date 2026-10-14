@@ -436,10 +436,11 @@ function handlePrompt(event, state) {
   }
   state.contract = parsed.contract;
   if (parsed.directive || parsed.correction) state.directiveError = null;
-  if (parsed.directive || parsed.correction) state.directiveWarning = parsed.warning;
-  const promptContext = contractContext(state.contract, state.delegation, 'active', state.directiveWarning, state.storageError);
+  if (parsed.directive || parsed.correction) state.directiveWarning = parsed.directive ? parsed.warning : null;
+  const promptContext = contractContext(state.contract, state.delegation, 'active', parsed.warning || state.directiveWarning, state.storageError);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
+  if (parsed.warning) return { ...context(promptContext), warning: parsed.warning };
   return repeatedContext ? none() : context(promptContext);
 }
 
@@ -759,6 +760,18 @@ function naturalCorrection(prompt, previous) {
   return null;
 }
 
+function unarmedDirectiveWarning(prompt) {
+  // Report an unquoted standalone directive without treating it as authority.
+  // Host-generated prefixes and user introductions cannot be distinguished
+  // from this text alone, so neither is removed to make a directive eligible.
+  const prose = correctionProse(prompt);
+  if (!/^ {0,3}\$stop-that-shit(?=$|[\s,:])/im.test(prose)) return null;
+  return {
+    code: 'DIRECTIVE_NOT_ARMED',
+    message: 'DIRECTIVE_NOT_ARMED: a Stop That Shit directive was not applied because it does not start the first non-empty line of the received prompt. Send the directive first in a separate message and check $stop-that-shit status before continuing.'
+  };
+}
+
 function validAgentBudget(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
@@ -783,8 +796,9 @@ function normalizeContract(previousContract) {
 
 function parseContractPrompt(prompt, previousContract = defaultContract()) {
   const previous = normalizeContract(previousContract);
-  const directive = parseDirective(String(prompt || ''));
-  const correction = naturalCorrection(String(prompt || ''), previous);
+  const text = String(prompt || '');
+  const directive = parseDirective(text);
+  const correction = naturalCorrection(text, previous);
   const next = { ...previous };
   let changed = false;
 
@@ -852,7 +866,7 @@ function parseContractPrompt(prompt, previousContract = defaultContract()) {
     changed,
     directive: Boolean(directive),
     correction: Boolean(correction),
-    warning: directive && directive.warning ? directive.warning : null,
+    warning: directive ? directive.warning : unarmedDirectiveWarning(text),
     error: null
   };
 }
