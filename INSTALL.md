@@ -104,6 +104,20 @@ Do not put an introduction before the directive. Embedded examples do not set
 directive fields. Unknown fields and conflicting values return an error and
 preserve the previous contract; submit a corrected directive before continuing.
 
+A standalone directive on a later line produces `DIRECTIVE_NOT_ARMED` context.
+Codex also receives a user-facing `systemMessage`. The directive does not set
+contract fields. Send it first in a separate message, then query
+`$stop-that-shit status`. Quoted and fenced examples remain context. The Hook
+does not remove prompt prefixes because its string input does not identify
+whether they came from the host or supplied content.
+
+For attachment inspection, `review` permits recognized read operations. An
+arbitrary Python script or code-execution tool remains unproven, including
+PDF/XLSX extraction. Creating extraction files needs explicit write authority
+and a verifiable output boundary. `change files=...` still asks when a tool's
+affected paths are unknown. A parser name or Skill description does not prove
+that arbitrary code is read-only.
+
 Natural-language mode corrections also skip code examples, explicit Markdown
 quote lines, and quoted text. For example, adding a `review only` example to
 README does not switch an active edit task to review.

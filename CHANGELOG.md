@@ -2,6 +2,11 @@
 
 ## Unreleased / 未发布
 
+- 对后置且未引用的独立指令返回 `DIRECTIVE_NOT_ARMED` 提示；Codex 同时
+  显示 systemMessage。保留首行授权边界，不从附件内容推断新权限。
+  / Report a standalone directive that follows other prompt content without
+  applying it. Codex also receives a user-facing message. Preserve the
+  first-line authority boundary; attachment parsing remains unproven.
 - STSS 覆盖文章、图注和新稿生成，按读者的理解与决定判断防御性说明，
   保留必要的条件与来源归属；新增两组中英文成对案例及固定响应回归。
   / Extend STSS to articles, captions, and drafting. Judge defensive wording
