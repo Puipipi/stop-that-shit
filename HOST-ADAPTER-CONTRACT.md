@@ -1,6 +1,6 @@
 # Host Adapter Contract
 
-Stop That Shit has six implemented host adapters in this candidate: Codex,
+Stop That Shit has six implemented host adapters in 0.2.5: Codex,
 Claude Code, OpenCode, Hermes Agent CLI, Pi, and Oh My Pi. Each adapter translates
 host input into the same `ControlEvent v2` and reuses the same contract parser,
 controller, decisions, state, and runtime evidence.
@@ -461,7 +461,7 @@ Pi operational adapter errors are caught so they retain the shared fail-open
 behavior. Only a shared policy denial returns Pi's `block`; `terminate` is
 omitted so the Agent can recover with an in-scope action.
 
-## Oh My Pi (unreleased candidate)
+## Oh My Pi
 
 The explicit entrypoint is `omp/stop-that-shit.ts`, checked against
 `@oh-my-pi/pi-coding-agent` `18.4.4`. It reuses the shared `ControlEvent v2`,

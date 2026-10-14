@@ -7,7 +7,7 @@
 <p align="center">
   <strong>수정은 끝났는데, AI는 아직도 확인 중인가요?</strong><br>
   AI 코딩 에이전트가 요청한 작업의 범위를 지키도록 돕는 Skill + Guard 플러그인입니다.<br>
-  Claude Code · Codex · OpenCode · Hermes Agent CLI · Pi 지원<br>
+  Claude Code · Codex · OpenCode · Hermes Agent CLI · Pi · Oh My Pi 지원<br>
   <a href="#설치">설치</a> · <a href="#사용법">사용법</a> ·
   <a href="EVIDENCE.md">평가 기록</a> · <a href="README.md">中文</a> ·
   <a href="README_EN.md">English</a>
@@ -77,7 +77,7 @@ Skill은 에이전트가 참고하는 작업 지침입니다.
 **1. 저장소 받기.** 터미널에서 실행합니다.
 
 ```bash
-git clone --branch 0.2.4 https://github.com/lennney/stop-that-shit.git
+git clone --branch 0.2.5 https://github.com/lennney/stop-that-shit.git
 cd stop-that-shit
 ```
 
@@ -106,7 +106,7 @@ claude plugin install stop-that-shit@stop-that-shit
 ### Codex
 
 ```bash
-codex plugin marketplace add lennney/stop-that-shit --ref 0.2.4
+codex plugin marketplace add lennney/stop-that-shit --ref 0.2.5
 codex plugin add stop-that-shit@stop-that-shit
 ```
 
@@ -120,6 +120,7 @@ Codex를 다시 시작하고 새 CLI TUI에서 `/hooks`를 엽니다.
 | --- | --- |
 | OpenCode | [GitHub에서 설치](INSTALL.md#opencode-install-from-github) — Guard 설치 후 Skill 등록은 별도로 확인하세요. |
 | Hermes Agent CLI | [플러그인 설치·활성화](INSTALL.md#hermes-agent-cli) — 활성화 후 CLI 또는 Gateway를 다시 시작합니다. |
+| Oh My Pi | [OMP 설치 안내](INSTALL.md#oh-my-pi) — 독립 Extension의 검증 대상은 18.4.4입니다. |
 | Pi Coding Agent | [Pi 설치 안내](INSTALL.md#pi-coding-agent) — 현재 어댑터의 검증 대상은 0.84.4입니다. |
 
 ## 사용법

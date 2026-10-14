@@ -11,10 +11,53 @@ actions, context responses, and permission denies. It records host effect as
 `unobserved`; a returned permission deny is not evidence that the host skipped
 the action.
 
-Version: 0.2.4 OpenCode V1/V2 compatibility
-Release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.4
-Previous release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.3
-Last updated: 2026-10-01
+Version: 0.2.5 release candidate
+Release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.5
+Previous release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.4
+Last updated: 2026-10-14
+
+## 0.2.5 release candidate
+
+This candidate is prepared for release; the tag and GitHub Release have not
+been published. Its code base is `14ef3f8a9c53811bdf11c3dac3c8a2d877113f24`,
+with synchronized 0.2.5 metadata and installation documentation. It includes
+the OMP adapter and the directive-feedback correction, retains Effect
+4.0.0-rc.112, and does not include the DSH adapter or the stable Effect upgrade.
+
+The defensible 0.2.5 claim is: the shared core provides explicit task-authority
+checks on covered host paths, and STSS provides advisory wording guidance.
+The new directive warning preserves the active contract; it does not prove
+attachment provenance or authorize arbitrary PDF/XLSX extraction.
+
+Candidate checks on Windows x64 with Node 24.14.1:
+
+- 609 source tests passed, zero failed, three optional host checks skipped;
+- 22/22 offline paired-case arms passed;
+- generated validator, Hermes, release allowlist, and whitespace checks passed;
+- `test:hosts` failed explicitly when host executables were not supplied.
+
+Packed-plugin acceptance also passed in OpenCode 1.18.18 and 2.0.18: review
+denied a write and its target remained absent, a read continued after denial,
+and a restarted process accepted explicit change and wrote the expected file.
+Both real CLI processes used a deterministic local model stand-in. These
+checks do not cover every background-child or direct Code Mode effect.
+
+The 60-file npm package was installed with lifecycle scripts disabled. OMP
+18.4.4 with Bun 1.3.14 loaded the Extension and both Skills. Native Runner and
+ToolWrapper checks denied review and out-of-scope writes without creating files,
+and an authorized write produced the expected content. Native EditTool checks
+passed 19 scenarios across five edit formats: all 13 denied calls preserved
+bytes and paths, and all 19 permitted calls produced the expected changes.
+
+Native OMP CLI/RPC checks also passed control commands, invalid-command recovery
+without a model turn, review denial, continued reading, explicit change,
+child-contract inheritance, rejection of child authority, completed-slot reuse,
+reused-ID denial, and rejection of untracked agent mail. These runs used native
+host components or a deterministic local model stand-in, with zero external
+model API calls. They did not repeat the interactive TUI or establish model
+effectiveness, Git-source installation, or arbitrary nested batch behavior.
+
+Earlier sections retain their original revisions, dates, and untested paths.
 
 ## Unreleased Oh My Pi candidate
 

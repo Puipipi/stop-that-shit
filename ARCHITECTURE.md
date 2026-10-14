@@ -10,7 +10,7 @@ checks explicit authority on supported action paths; it does not infer business
 necessity from mechanism names. Updating the Skill does not change Guard policy.
 
 Stop That Shit has a host-independent control core, six thin host adapters
-in this candidate (including Oh My Pi), and a metadata-only runtime evidence sidecar.
+in 0.2.5 (including Oh My Pi), and a metadata-only runtime evidence sidecar.
 
 ```text
 Codex Hook JSON       ----> Codex Adapter --------\
@@ -49,7 +49,7 @@ OMP Extension         ----> OMP Adapter ----------/
 - `.hermes-plugin/__init__.py` is the only Hermes host entrypoint and bridges
   native Plugin callbacks to the bundled runtime.
 - `pi/stop-that-shit.ts` is the Pi package entrypoint.
-- `omp/stop-that-shit.ts` is the separate, unreleased Oh My Pi entrypoint.
+- `omp/stop-that-shit.ts` is the separate Oh My Pi entrypoint.
   `src/adapters/omp-*.cjs` translate native events into the shared controller.
 - `src/state-schema.cjs` validates and migrates saved state in memory. It owns
   the schema version, fresh state, and recovery defaults; it performs no I/O.
