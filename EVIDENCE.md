@@ -11,16 +11,15 @@ actions, context responses, and permission denies. It records host effect as
 `unobserved`; a returned permission deny is not evidence that the host skipped
 the action.
 
-Version: 0.2.5 release candidate
+Version: 0.2.5 OMP and recovery
 Release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.5
 Previous release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.4
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
-## 0.2.5 release candidate
+## 0.2.5 — 2026-10-15
 
-This candidate is prepared for release; the tag and GitHub Release have not
-been published. Its code base is `14ef3f8a9c53811bdf11c3dac3c8a2d877113f24`,
-with synchronized 0.2.5 metadata and installation documentation. It includes
+This release builds on `aaf6725dd3e0b41ad949bf2eab62775e0424c3f0`, with final
+release documentation and unchanged runtime code. It includes
 the OMP adapter and the directive-feedback correction, retains Effect
 4.0.0-rc.112, and does not include the DSH adapter or the stable Effect upgrade.
 
@@ -29,7 +28,7 @@ checks on covered host paths, and STSS provides advisory wording guidance.
 The new directive warning preserves the active contract; it does not prove
 attachment provenance or authorize arbitrary PDF/XLSX extraction.
 
-Candidate checks on Windows x64 with Node 24.14.1:
+Release checks on Windows x64 with Node 24.14.1:
 
 - 609 source tests passed, zero failed, three optional host checks skipped;
 - 22/22 offline paired-case arms passed;
@@ -59,7 +58,7 @@ effectiveness, Git-source installation, or arbitrary nested batch behavior.
 
 Earlier sections retain their original revisions, dates, and untested paths.
 
-## Unreleased Oh My Pi candidate
+## Historical Oh My Pi pre-release checks
 
 The isolated candidate is based on public main `749c921`. Its version field
 remains 0.2.4; it is not the published 0.2.4 release. The candidate passed
@@ -101,7 +100,7 @@ These results do not establish general model effectiveness. Git-source
 installation, arbitrary models, nested batch tasks, and completed-agent wakeup
 remain unverified. Codex Desktop evidence is recorded separately below.
 
-## Unreleased shared control corrections
+## Historical shared control pre-release checks
 
 Shared regression tests cover repeated execution IDs, ambiguous completion,
 watch/off history, damaged current ledgers, legacy migration, state replacement
@@ -120,7 +119,7 @@ no content changes. The integration changed only package-lock.json relative to
 the OMP candidate. It was a local compatibility check, not a merged or released
 version.
 
-## Unreleased Issue #66 scope correction
+## Historical Issue #66 pre-release checks
 
 Parser and Hook regression tests cover Chinese observation objects, standalone
 read-only instructions, repeated heartbeat text, embedded directives, and direct
