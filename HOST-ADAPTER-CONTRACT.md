@@ -430,18 +430,43 @@ or null for an unmapped point, so every listener can pass through the same call.
 `context` carries what the native signature cannot deliver in one argument:
 
 ```js
+// The session lookup lets the bridge walk up the parent chain to find the
+// root. The header names only the immediate parent, so for root → child →
+// grandchild the resolver must visit child → root before keying the call.
+function rootOf(sessionId, getSessionById) {
+  let current = sessionId;
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const session = getSessionById(current);
+    const header = session && session.header;
+    if (!header || !header.parentSession) return current;
+    current = header.parentSession;
+  }
+  return null; // cycle or unreachable: fail closed
+}
+
 // Tools waterfall: (exec, next). `rootSessionId` is REQUIRED whenever the
 // calling session has a `parentSession`; without it the call is refused, because
 // the header names only the immediate parent and one hop is not the root.
+// Pass `resolveRootSession` so the adapter can resolve the full lineage
+// instead of trusting an immediate-parent id as the root.
 ctx.on('tools/pre-execute', async (exec, next) => {
-  const payload = fromNativeEvent('tools/pre-execute', exec, { rootSessionId: rootOf(exec) })
+  const payload = fromNativeEvent('tools/pre-execute', exec, {
+    rootSessionId: rootOf(exec.agent.session.id, getSessionById),
+    resolveRootSession: (id) => rootOf(id, getSessionById)
+  })
   if (!payload) return next()
   return applyDshDecision('tools/pre-execute', handleDshHook('tools/pre-execute', payload, options), next)
 })
 
 // Tools waterfall: (exec, result, next) — the result is a separate argument.
 ctx.on('tools/post-execute', async (exec, result, next) => {
-  const payload = fromNativeEvent('tools/post-execute', exec, { result, rootSessionId: rootOf(exec) })
+  const payload = fromNativeEvent('tools/post-execute', exec, {
+    result,
+    rootSessionId: rootOf(exec.agent.session.id, getSessionById),
+    resolveRootSession: (id) => rootOf(id, getSessionById)
+  })
   if (payload) handleDshHook('tools/post-execute', payload, options)
   return next()
 })
@@ -453,10 +478,7 @@ ctx.on('subagent/start', (info) => {
 })
 ```
 
-Without `context.rootSessionId` a delegated tool call is refused outright, with a
-reason naming the missing field. That is deliberate: the session header exposes
-only the immediate parent, and the intermediate child in a deeper delegation
-holds no contract, so guessing a parent would restore the bypass.
+Without `context.rootSessionId` and without a `resolveRootSession` callback, a delegated tool call is refused outright, with a reason naming the missing field. That is deliberate: the session header exposes only the immediate parent, and the intermediate child in a deeper delegation holds no contract, so guessing a parent would restore the bypass. A supplied `rootSessionId` is trusted as the authority; when it is absent, `resolveRootSession` walks the parent chain and returns null if the root cannot be reached.
 
 Without `context.result` the post-dispatch fact carries no result, and without
 `context.sessionId` a subagent fact is not translated at all: filing it under

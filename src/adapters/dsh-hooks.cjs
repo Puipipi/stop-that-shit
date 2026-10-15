@@ -83,14 +83,45 @@ function hasParentSession(exec) {
 // The header names only the IMMEDIATE parent, so a grandchild's parentSession
 // points at the child, not the root. There is no way to reach the root from the
 // session object alone, and one hop is not enough: the intermediate child never
-// holds a contract, because a delegated prompt is not translated. So when a
-// parent session is present the root must come from the caller as
-// `context.rootSessionId`, and its absence is unverifiable rather than safe.
+// holds a contract, because a delegated prompt is not translated.
+//
+// `resolveRootLineage` walks up the parent chain using a caller-supplied session
+// lookup. Without it, or when the lookup cannot reach a session with no parent,
+// the root is unverifiable and the call is refused rather than keyed by an
+// intermediate child that holds no contract.
+function resolveRootLineage(sessionId, getSessionById) {
+  // Without a session lookup we cannot walk past the current session, so the
+  // root is unverifiable and the call is refused rather than trusted.
+  if (!getSessionById) return null;
+
+  let current = String(sessionId || '');
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const session = getSessionById(current);
+    const header = session && session.header;
+    const parent = header && header.parentSession;
+    if (!parent) return current;
+    current = parent;
+  }
+  return null;
+}
+
 function rootSessionKey(exec, context) {
   const supplied = String((context && context.rootSessionId) || '');
   if (supplied) return { id: supplied };
+
+  const resolver = context && context.resolveRootSession;
+  const session = exec && exec.agent && exec.agent.session;
+  const sessionId = String((session && session.id) || '');
+
+  if (typeof resolver === 'function') {
+    const rootId = resolver(sessionId);
+    if (rootId) return { id: rootId };
+  }
+
   if (hasParentSession(exec)) return null;
-  return { id: nativeToolSessionId(exec) };
+  return { id: sessionId };
 }
 
 // The workspace the session runs in. `ToolExecution` carries no `cwd`; the
@@ -431,6 +462,7 @@ module.exports = {
   fromNativeEvent,
   handleDshHook,
   messageText,
+  resolveRootLineage,
   resultLifecycle,
   toControlEvent
 };

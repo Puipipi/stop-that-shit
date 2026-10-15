@@ -10,6 +10,7 @@ const {
   fromControlResult,
   fromNativeEvent,
   handleDshHook,
+  resolveRootLineage,
   resultLifecycle,
   toControlEvent
 } = require('../src/adapters/dsh-hooks.cjs');
@@ -951,4 +952,88 @@ test('Regression: the documented bridge refuses a nested call with no root suppl
   const decision = handleDshHook('tools/pre-execute', payload, { dataDir: mkdtempSync(path.join(os.tmpdir(), 'sts-noroot-')) });
   assert.equal(decision.kind, 'deny');
   assert.match(decision.reason, /rootSessionId/);
+});
+
+test('Regression: root lineage resolves through nested delegation without a manually supplied root', (t) => {
+  const options = workspace(t);
+  start('root', options);
+  handleDshHook('agent/pre-step', fromNativeEvent('agent/pre-step', {
+    agent: { session: { id: 'root' } },
+    messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '$stop-that-shit review files=src/** -- look' }] }],
+    turn: 1
+  }), options);
+
+  // Session tree: root → child → grandchild. The header names only the
+  // immediate parent, so the resolver walks up to find the root.
+  const sessions = {
+    root: { id: 'root', header: {} },
+    child: { id: 'child', header: { parentSession: 'root' } },
+    grandchild: { id: 'grandchild', header: { parentSession: 'child' } }
+  };
+  const resolveRoot = (sessionId) => resolveRootLineage(sessionId, (id) => sessions[id]);
+
+  const grandchild = { id: 'grandchild', header: { parentSession: 'child' } };
+  const outOfScope = { file_path: 'docs/other.md', content: 'x' };
+
+  // Without any root resolution, the call is refused (fail closed).
+  const unverified = handleDshHook(
+    'tools/pre-execute',
+    fromNativeEvent('tools/pre-execute', {
+      name: 'write', arguments: outOfScope, callId: 'g1', agent: { session: grandchild }
+    }),
+    options
+  );
+  assert.equal(unverified.kind, 'deny');
+  assert.match(unverified.reason, /verified root session/);
+
+  // With the resolver walking up grandchild → child → root, the out-of-scope
+  // write is denied against the root contract.
+  const denied = handleDshHook(
+    'tools/pre-execute',
+    fromNativeEvent('tools/pre-execute', {
+      name: 'write', arguments: outOfScope, callId: 'g2', agent: { session: grandchild }
+    }, { resolveRootSession: resolveRoot }),
+    options
+  );
+  assert.equal(denied.kind, 'deny');
+  assert.match(denied.reason, /MODE_FORBIDS_MUTATION/);
+
+  // The nearest permitted action still continues through the same chain.
+  assert.equal(handleDshHook(
+    'tools/pre-execute',
+    fromNativeEvent('tools/pre-execute', {
+      name: 'read', arguments: { file_path: 'src/ok.js' }, callId: 'g3', agent: { session: grandchild }
+    }, { resolveRootSession: resolveRoot }),
+    options
+  ), null);
+
+  // An explicitly authorized in-scope write through the grandchild is permitted.
+  handleDshHook('agent/pre-step', fromNativeEvent('agent/pre-step', {
+    agent: { session: { id: 'root' } },
+    messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '$stop-that-shit change files=src/** -- implement' }] }],
+    turn: 2
+  }), options);
+  assert.equal(handleDshHook(
+    'tools/pre-execute',
+    fromNativeEvent('tools/pre-execute', {
+      name: 'write', arguments: { file_path: 'src/ok.ts', content: 'x' }, callId: 'g4', agent: { session: grandchild }
+    }, { resolveRootSession: resolveRoot }),
+    options
+  ), null);
+});
+
+test('Regression: resolveRootLineage stops at a cycle and returns null', () => {
+  // A session tree that loops back on itself must not walk forever.
+  const sessions = {
+    a: { id: 'a', header: { parentSession: 'b' } },
+    b: { id: 'b', header: { parentSession: 'a' } }
+  };
+  assert.equal(resolveRootLineage('a', (id) => sessions[id]), null);
+  assert.equal(resolveRootLineage('b', (id) => sessions[id]), null);
+
+  // A session with no parent is its own root.
+  assert.equal(resolveRootLineage('root', (id) => ({ id: 'root', header: {} })), 'root');
+
+  // No lookup available means the root is unverifiable.
+  assert.equal(resolveRootLineage('child'), null);
 });
