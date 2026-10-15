@@ -116,7 +116,9 @@ function fromControlResult(hookEventName, result) {
   }
   if (result.kind === 'context') {
     if (['PostToolUse', 'SubagentStop', 'SessionEnd'].includes(hookEventName)) return null;
-    return contextOutput(hookEventName, result.text);
+    const output = contextOutput(hookEventName, result.text);
+    if (result.warning) output.systemMessage = result.warning.message;
+    return output;
   }
   if (result.kind === 'deny') {
     return {

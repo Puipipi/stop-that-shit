@@ -153,6 +153,12 @@ belong in separate contributions.
 
 ## Evaluation claims
 
+For OpenCode adapter or release-package changes, set `STS_OPENCODE_V1_BIN`
+and `STS_OPENCODE_V2_BIN` to the installed executables, then run
+`npm run test:hosts`. Both hosts are required. These packed-plugin checks use
+a local model stand-in and do not establish model effectiveness. Ordinary
+`npm test` skips the native smoke checks when the binaries are absent.
+
 Any public effectiveness claim must state:
 
 - repository and immutable revision;

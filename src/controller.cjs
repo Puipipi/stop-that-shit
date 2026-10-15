@@ -157,10 +157,11 @@ function handlePrompt(event, state) {
   }
   state.contract = parsed.contract;
   if (parsed.directive || parsed.correction) state.directiveError = null;
-  if (parsed.directive || parsed.correction) state.directiveWarning = parsed.warning;
-  const promptContext = contractContext(state.contract, state.delegation, 'active', state.directiveWarning, state.storageError);
+  if (parsed.directive || parsed.correction) state.directiveWarning = parsed.directive ? parsed.warning : null;
+  const promptContext = contractContext(state.contract, state.delegation, 'active', parsed.warning || state.directiveWarning, state.storageError);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
+  if (parsed.warning) return { ...context(promptContext), warning: parsed.warning };
   return repeatedContext ? none() : context(promptContext);
 }
 

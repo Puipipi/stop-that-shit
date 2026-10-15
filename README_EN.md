@@ -137,7 +137,7 @@ Expand your host. For guidance without runtime enforcement, [install only the Sk
 <details>
 <summary>Claude Code</summary>
 
-Download and extract the [0.2.4 source](https://github.com/lennney/stop-that-shit/archive/refs/tags/0.2.4.zip), then run from the checkout root:
+Download and extract the [0.2.5 source](https://github.com/lennney/stop-that-shit/archive/refs/tags/0.2.5.zip), then run from the checkout root:
 
 ```bash
 claude plugin validate .
@@ -157,7 +157,7 @@ Restart Claude Code or run `/reload-plugins`, then invoke:
 <summary>Codex</summary>
 
 ```bash
-codex plugin marketplace add lennney/stop-that-shit --ref 0.2.4
+codex plugin marketplace add lennney/stop-that-shit --ref 0.2.5
 codex plugin add stop-that-shit@stop-that-shit
 ```
 
@@ -233,11 +233,11 @@ The pinned tag includes the Pi adapter and both Skills. See [INSTALL.md](INSTALL
 </details>
 
 <details>
-<summary>Oh My Pi (unreleased candidate)</summary>
+<summary>Oh My Pi</summary>
 
 The separate Extension was checked with `@oh-my-pi/pi-coding-agent` `18.4.4`.
-Published version `0.2.4` does not include OMP. Start from a local checkout
-that contains this candidate:
+Version `0.2.5` includes the separate OMP Extension. Start from the tagged
+checkout or extracted release package:
 
 ```bash
 omp -e /absolute/path/to/stop-that-shit/omp/stop-that-shit.ts --skills /absolute/path/to/stop-that-shit/skills --sts-contract "review agents=0 -- inspect"
@@ -246,7 +246,7 @@ omp -e /absolute/path/to/stop-that-shit/omp/stop-that-shit.ts --skills /absolute
 Confirm that OMP loaded the Extension. Use `/sts change -- ...` to change mode
 or `/sts status` to inspect the contract. These native commands also work in
 RPC. The TUI also accepts first-line `$stop-that-shit` directives.
-See [INSTALL.md](INSTALL.md#oh-my-pi-unreleased-candidate).
+See [INSTALL.md](INSTALL.md#oh-my-pi).
 
 </details>
 

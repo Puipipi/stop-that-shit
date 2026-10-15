@@ -1,6 +1,6 @@
 # Install Stop That Shit
 
-These instructions target [`0.2.4`](https://github.com/lennney/stop-that-shit/releases/tag/0.2.4).
+These instructions target [`0.2.5`](https://github.com/lennney/stop-that-shit/releases/tag/0.2.5).
 
 For local checkout validation, use the flow under
 [Local Guard development](#local-guard-development).
@@ -45,7 +45,7 @@ The Guard requires Node.js 18 or newer. Add the repository as a Codex
 marketplace, then install the plugin:
 
 ```powershell
-codex plugin marketplace add lennney/stop-that-shit --ref 0.2.4
+codex plugin marketplace add lennney/stop-that-shit --ref 0.2.5
 codex plugin add stop-that-shit@stop-that-shit
 ```
 
@@ -103,6 +103,20 @@ or a tab indicate a code example. Put task text after `--`, `: `, or a newline.
 Do not put an introduction before the directive. Embedded examples do not set
 directive fields. Unknown fields and conflicting values return an error and
 preserve the previous contract; submit a corrected directive before continuing.
+
+A standalone directive on a later line produces `DIRECTIVE_NOT_ARMED` context.
+Codex also receives a user-facing `systemMessage`. The directive does not set
+contract fields. Send it first in a separate message, then query
+`$stop-that-shit status`. Quoted and fenced examples remain context. The Hook
+does not remove prompt prefixes because its string input does not identify
+whether they came from the host or supplied content.
+
+For attachment inspection, `review` permits recognized read operations. An
+arbitrary Python script or code-execution tool remains unproven, including
+PDF/XLSX extraction. Creating extraction files needs explicit write authority
+and a verifiable output boundary. `change files=...` still asks when a tool's
+affected paths are unknown. A parser name or Skill description does not prove
+that arbitrary code is read-only.
 
 Natural-language mode corrections also skip code examples, explicit Markdown
 quote lines, and quoted text. For example, adding a `review only` example to
@@ -310,7 +324,7 @@ Contract state and runtime evidence retain their existing format.
 
 Maintainers can run the packed-host checks with `STS_OPENCODE_V1_BIN` and
 `STS_OPENCODE_V2_BIN` set to the respective executables:
-`node --test test/opencode-dual-smoke.test.mjs`. The checks use a local model
+`npm run test:hosts`. The checks use a local model
 stand-in and verify denial, continued reading, and explicit change after restart.
 
 ## Hermes Agent CLI
@@ -350,7 +364,7 @@ Add `-l` for a project-scoped installation. The tagged release contains
 the Pi adapter; use this pinned Git ref instead of an unpinned branch:
 
 ```bash
-pi install git:github.com/lennney/stop-that-shit@0.2.4
+pi install git:github.com/lennney/stop-that-shit@0.2.5
 ```
 
 Start a new Pi process, or run `/reload` in the TUI after changing package
@@ -380,7 +394,7 @@ cp skills/stop-that-shit/SKILL.md ~/.claude/skills/stop-that-shit/SKILL.md
 For Codex, ask the built-in Skill Installer to install the shared Skill folder:
 
 ```text
-$skill-installer Install stop-that-shit from https://github.com/lennney/stop-that-shit/tree/0.2.4/skills/stop-that-shit
+$skill-installer Install stop-that-shit from https://github.com/lennney/stop-that-shit/tree/0.2.5/skills/stop-that-shit
 ```
 
 To install only Stop That Shit Slop from the tagged checkout:
@@ -468,11 +482,11 @@ runtime events, and manual labels in the host-provided data directory
 Review that directory separately if you uninstall. See [PRIVACY.md](PRIVACY.md)
 for the distinction between session state and runtime events.
 
-## Oh My Pi (unreleased candidate)
+## Oh My Pi
 
 The OMP Extension is checked with `@oh-my-pi/pi-coding-agent` `18.4.4`.
-Published STS `0.2.4` does not contain it. Use a local checkout or an extracted
-candidate package that contains `omp/stop-that-shit.ts`:
+STS `0.2.5` includes it. Use the tagged checkout or extracted release package
+that contains `omp/stop-that-shit.ts`:
 
 ```bash
 omp -e /absolute/path/to/stop-that-shit/omp/stop-that-shit.ts --skills /absolute/path/to/stop-that-shit/skills --sts-contract "review agents=0 -- inspect"

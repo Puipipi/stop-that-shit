@@ -11,12 +11,54 @@ actions, context responses, and permission denies. It records host effect as
 `unobserved`; a returned permission deny is not evidence that the host skipped
 the action.
 
-Version: 0.2.4 OpenCode V1/V2 compatibility
-Release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.4
-Previous release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.3
-Last updated: 2026-10-01
+Version: 0.2.5 OMP and recovery
+Release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.5
+Previous release: https://github.com/lennney/stop-that-shit/releases/tag/0.2.4
+Last updated: 2026-10-15
 
-## Unreleased Oh My Pi candidate
+## 0.2.5 — 2026-10-15
+
+This release builds on `aaf6725dd3e0b41ad949bf2eab62775e0424c3f0`, with final
+release documentation and unchanged runtime code. It includes
+the OMP adapter and the directive-feedback correction, retains Effect
+4.0.0-rc.112, and does not include the DSH adapter or the stable Effect upgrade.
+
+The defensible 0.2.5 claim is: the shared core provides explicit task-authority
+checks on covered host paths, and STSS provides advisory wording guidance.
+The new directive warning preserves the active contract; it does not prove
+attachment provenance or authorize arbitrary PDF/XLSX extraction.
+
+Release checks on Windows x64 with Node 24.14.1:
+
+- 609 source tests passed, zero failed, three optional host checks skipped;
+- 22/22 offline paired-case arms passed;
+- generated validator, Hermes, release allowlist, and whitespace checks passed;
+- `test:hosts` failed explicitly when host executables were not supplied.
+
+Packed-plugin acceptance also passed in OpenCode 1.18.18 and 2.0.18: review
+denied a write and its target remained absent, a read continued after denial,
+and a restarted process accepted explicit change and wrote the expected file.
+Both real CLI processes used a deterministic local model stand-in. These
+checks do not cover every background-child or direct Code Mode effect.
+
+The 60-file npm package was installed with lifecycle scripts disabled. OMP
+18.4.4 with Bun 1.3.14 loaded the Extension and both Skills. Native Runner and
+ToolWrapper checks denied review and out-of-scope writes without creating files,
+and an authorized write produced the expected content. Native EditTool checks
+passed 19 scenarios across five edit formats: all 13 denied calls preserved
+bytes and paths, and all 19 permitted calls produced the expected changes.
+
+Native OMP CLI/RPC checks also passed control commands, invalid-command recovery
+without a model turn, review denial, continued reading, explicit change,
+child-contract inheritance, rejection of child authority, completed-slot reuse,
+reused-ID denial, and rejection of untracked agent mail. These runs used native
+host components or a deterministic local model stand-in, with zero external
+model API calls. They did not repeat the interactive TUI or establish model
+effectiveness, Git-source installation, or arbitrary nested batch behavior.
+
+Earlier sections retain their original revisions, dates, and untested paths.
+
+## Historical Oh My Pi pre-release checks
 
 The isolated candidate is based on public main `749c921`. Its version field
 remains 0.2.4; it is not the published 0.2.4 release. The candidate passed
@@ -58,7 +100,7 @@ These results do not establish general model effectiveness. Git-source
 installation, arbitrary models, nested batch tasks, and completed-agent wakeup
 remain unverified. Codex Desktop evidence is recorded separately below.
 
-## Unreleased shared control corrections
+## Historical shared control pre-release checks
 
 Shared regression tests cover repeated execution IDs, ambiguous completion,
 watch/off history, damaged current ledgers, legacy migration, state replacement
@@ -77,7 +119,7 @@ no content changes. The integration changed only package-lock.json relative to
 the OMP candidate. It was a local compatibility check, not a merged or released
 version.
 
-## Unreleased Issue #66 scope correction
+## Historical Issue #66 pre-release checks
 
 Parser and Hook regression tests cover Chinese observation objects, standalone
 read-only instructions, repeated heartbeat text, embedded directives, and direct

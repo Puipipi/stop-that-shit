@@ -35,6 +35,47 @@ function pre(session, toolName, toolInput, turnId = 'turn-1') {
   };
 }
 
+test('a later standalone directive reports that it was not armed and preserves the active contract', t => {
+  const options = workspace(t);
+  const session = 'attachment-directive-feedback';
+  handleHook(prompt(session, '$stop-that-shit review agents=0 -- inspect the attachments'), options);
+  const contract = readState(session, options.dataDir).contract;
+  const text = 'Attached files: table.xlsx, supplement.pdf\n$stop-that-shit change agents=0 -- extract the supplied files';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const output = handleHook(prompt(session, text), options);
+    assert.match(output?.hookSpecificOutput?.additionalContext || '', /DIRECTIVE_NOT_ARMED/);
+    assert.match(output.systemMessage, /DIRECTIVE_NOT_ARMED/);
+    assert.match(output.hookSpecificOutput.additionalContext, /first non-empty line/);
+    assert.match(output.hookSpecificOutput.additionalContext, /mode=review/);
+    assert.deepEqual(readState(session, options.dataDir).contract, contract);
+  }
+  assert.match(handleHook(pre(session, 'exec_command', { command: 'python parse_attachments.py' }), options).hookSpecificOutput.permissionDecisionReason, /MUTABILITY_UNPROVEN/);
+  assert.equal(handleHook(pre(session, 'exec_command', { command: 'Get-Content data.csv' }), options), null);
+  const following = handleHook(prompt(session, 'Continue inspecting the supplied files.'), options);
+  assert.doesNotMatch(following?.hookSpecificOutput?.additionalContext || '', /DIRECTIVE_NOT_ARMED/);
+  assert.equal(following?.systemMessage, undefined);
+
+  handleHook(prompt(session, '$stop-that-shit change agents=0 -- extract the supplied files'), options);
+  assert.equal(readState(session, options.dataDir).contract.mode, 'change');
+  assert.equal(handleHook(pre(session, 'exec_command', { command: 'python parse_attachments.py' }), options), null);
+});
+
+test('quoted directive examples remain context and do not produce an arming warning', t => {
+  const options = workspace(t);
+  const session = 'quoted-directive-feedback';
+  handleHook(prompt(session, '$stop-that-shit review -- inspect only'), options);
+  for (const text of [
+    'Explain this example:\n```text\n$stop-that-shit change -- example\n```',
+    'Explain this example:\n> $stop-that-shit change -- example',
+    'Explain this example:\n    $stop-that-shit change -- example',
+    'Explain this example: `$stop-that-shit change -- example`'
+  ]) {
+    const output = handleHook(prompt(session, text), options);
+    assert.doesNotMatch(output?.hookSpecificOutput?.additionalContext || '', /DIRECTIVE_NOT_ARMED/);
+    assert.equal(readState(session, options.dataDir).contract.mode, 'review');
+  }
+});
+
 test('Codex heartbeat observation scope preserves change but a real read-only correction denies writes', t => {
   const options = workspace(t);
   const session = 'heartbeat-scope';
