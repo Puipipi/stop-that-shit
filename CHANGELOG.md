@@ -2,7 +2,7 @@
 
 ## Unreleased / 未发布
 
-## 0.2.5 — Release candidate / 发布候选
+## 0.2.5 — 2026-10-15 (OMP and recovery / OMP 与恢复修复)
 
 - 对后置且未引用的独立指令返回 `DIRECTIVE_NOT_ARMED` 提示；Codex 同时
   显示 systemMessage。保留首行授权边界，不从附件内容推断新权限。
@@ -43,8 +43,10 @@
   / Update OpenCode schema to 2.0.26, retain Effect 4.0.0-rc.112, regenerate
   Hermes, and update pinned CI/scanner Actions.
 
-This is a prepared candidate, not a published release. Validation is recorded
-in [EVIDENCE.md](EVIDENCE.md). No new model-effectiveness claim is made.
+Validation is recorded in [EVIDENCE.md](EVIDENCE.md). No new model-effectiveness
+claim is made.
+
+**Full Changelog**: [0.2.4...0.2.5](https://github.com/lennney/stop-that-shit/compare/0.2.4...0.2.5)
 
 ## 0.2.4 — 2026-09-28 (OpenCode V1/V2 compatibility / 双版本兼容)
 
