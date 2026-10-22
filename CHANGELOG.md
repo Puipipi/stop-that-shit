@@ -2,6 +2,11 @@
 
 ## Unreleased / 未发布
 
+- 修复 #99：接受 Codex 补全生成的 `$stop-that-shit:stop-that-shit` 指令和查询，
+  保留短名称、首行与引用/代码示例边界。
+  / Accept Codex's namespaced Skill invocation for directives and queries.
+  Preserve the short name and the first-line, quote, and code-example boundaries.
+
 ## 0.2.5 — 2026-10-15 (OMP and recovery / OMP 与恢复修复)
 
 - 对后置且未引用的独立指令返回 `DIRECTIVE_NOT_ARMED` 提示；Codex 同时

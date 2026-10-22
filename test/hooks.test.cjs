@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { spawnSync } = require('node:child_process');
 const { handleHook } = require('../src/hook-policy.cjs');
 const { acquireSessionLock, readState, statePath } = require('../src/state.cjs');
 const { readRuntime } = require('../src/runtime-audit.cjs');
@@ -34,6 +35,49 @@ function pre(session, toolName, toolInput, turnId = 'turn-1') {
     tool_input: toolInput
   };
 }
+
+test('Codex hook entrypoint accepts the namespaced skill invocation for modes and queries (#99)', t => {
+  const { dataDir } = workspace(t);
+  const hook = path.join(__dirname, '..', 'hooks', 'stop-that-shit.cjs');
+  for (const name of ['$stop-that-shit', '$stop-that-shit:stop-that-shit']) {
+    const session = `invocation-${name}`;
+    const invoke = input => {
+      const result = spawnSync(process.execPath, [hook], {
+        input: JSON.stringify(typeof input === 'string' ? prompt(session, input) : input),
+        encoding: 'utf8', timeout: 5000,
+        env: { ...process.env, PLUGIN_DATA: dataDir, CLAUDE_PLUGIN_DATA: dataDir }
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, '');
+      return result.stdout.trim() ? JSON.parse(result.stdout) : null;
+    };
+    for (const mode of ['review', 'change']) {
+      const output = invoke(`${name} ${mode} -- Inspect the sample.`);
+      assert.notEqual(output.decision, 'block', `${name} ${mode}: ${output.reason}`);
+      const state = readState(session, dataDir);
+      assert.equal(state.contract.mode, mode);
+      assert.equal(state.contract.level, 'guard');
+      assert.equal(state.directiveError, null);
+      const write = invoke(pre(session, 'apply_patch', {
+        patch: '*** Begin Patch\n*** Add File: sample.cjs\n+module.exports = 1;\n*** End Patch'
+      }));
+      if (mode === 'review') {
+        assert.equal(write.hookSpecificOutput.permissionDecision, 'deny');
+        assert.match(write.hookSpecificOutput.permissionDecisionReason, /MODE_FORBIDS_MUTATION/);
+      } else {
+        assert.equal(write, null);
+      }
+    }
+    const file = statePath(session, dataDir);
+    const before = fs.readFileSync(file, 'utf8');
+    for (const query of ['status', 'runtime', 'runtime all']) {
+      const output = invoke(`${name} ${query}`);
+      assert.notEqual(output.decision, 'block', `${name} ${query}: ${output.reason}`);
+      assert.match(output.hookSpecificOutput.additionalContext, query === 'status' ? /ARMED \/ change/ : /Checked actions:/);
+      assert.equal(fs.readFileSync(file, 'utf8'), before);
+    }
+  }
+});
 
 test('a later standalone directive reports that it was not armed and preserves the active contract', t => {
   const options = workspace(t);
@@ -660,47 +704,49 @@ test('default sessions are observing and record checks without returning deny', 
   assert.equal(runtime.events[0].decision.responseOutcome, 'none');
 });
 
-test('status, runtime, explain, and label commands do not mutate the active contract', (t) => {
-  const options = workspace(t);
-  handleHook(prompt('query-session', '$stop-that-shit review -- inspect only'), options);
-  const denied = handleHook(pre('query-session', 'apply_patch', { command: 'patch' }), options);
-  const eventId = denied.hookSpecificOutput.permissionDecisionReason.match(/evt_[0-9a-f-]+/)[0];
-  const before = readState('query-session', options.dataDir).contract;
-  const file = statePath('query-session', options.dataDir);
-  const rawBefore = fs.readFileSync(file, 'utf8');
-  const modifiedBefore = fs.statSync(file).mtimeMs;
-  const release = acquireSessionLock('query-session', options.dataDir);
-  let status, runtime, explain, label;
-  try {
-    status = handleHook(prompt('query-session', '$stop-that-shit status'), options);
-    runtime = handleHook(prompt('query-session', '$stop-that-shit runtime'), options);
-    explain = handleHook(prompt('query-session', `$stop-that-shit explain ${eventId}`), options);
-    label = handleHook(prompt('query-session', `$stop-that-shit label ${eventId} correct`), options);
-  } finally {
-    release();
-  }
+for (const name of ['$stop-that-shit', '$stop-that-shit:stop-that-shit']) {
+  test(`${name} status, runtime, explain, and label commands do not mutate the active contract`, (t) => {
+    const options = workspace(t);
+    handleHook(prompt('query-session', '$stop-that-shit review -- inspect only'), options);
+    const denied = handleHook(pre('query-session', 'apply_patch', { command: 'patch' }), options);
+    const eventId = denied.hookSpecificOutput.permissionDecisionReason.match(/evt_[0-9a-f-]+/)[0];
+    const before = readState('query-session', options.dataDir).contract;
+    const file = statePath('query-session', options.dataDir);
+    const rawBefore = fs.readFileSync(file, 'utf8');
+    const modifiedBefore = fs.statSync(file).mtimeMs;
+    const release = acquireSessionLock('query-session', options.dataDir);
+    let status, runtime, explain, label;
+    try {
+      status = handleHook(prompt('query-session', `${name} status`), options);
+      runtime = handleHook(prompt('query-session', `${name} runtime`), options);
+      explain = handleHook(prompt('query-session', `${name} explain ${eventId}`), options);
+      label = handleHook(prompt('query-session', `${name} label ${eventId} correct`), options);
+    } finally {
+      release();
+    }
 
-  assert.match(status.hookSpecificOutput.additionalContext, /ARMED \/ review/);
-  assert.match(runtime.hookSpecificOutput.additionalContext, /checked actions: 1/i);
-  assert.doesNotMatch(runtime.hookSpecificOutput.additionalContext, /Execution-denial responses/);
-  assert.match(explain.hookSpecificOutput.additionalContext, new RegExp(eventId));
-  assert.match(label.hookSpecificOutput.additionalContext, /correct/);
-  assert.deepEqual(readState('query-session', options.dataDir).contract, before);
-  assert.equal(fs.readFileSync(file, 'utf8'), rawBefore);
-  assert.equal(fs.statSync(file).mtimeMs, modifiedBefore);
-  assert.equal(readRuntime({ eventId }, options).events[0].label, 'correct');
-
-  for (const example of [
-    `    $stop-that-shit label ${eventId} incorrect`,
-    `\t$stop-that-shit label ${eventId} incorrect`,
-    `\`$stop-that-shit label ${eventId} incorrect\``,
-    `$stop-that-shit label\n${eventId} incorrect`
-  ]) {
-    handleHook(prompt('query-session', example), options);
-    assert.equal(readRuntime({ eventId }, options).events[0].label, 'correct', example);
+    assert.match(status.hookSpecificOutput.additionalContext, /ARMED \/ review/);
+    assert.match(runtime.hookSpecificOutput.additionalContext, /checked actions: 1/i);
+    assert.doesNotMatch(runtime.hookSpecificOutput.additionalContext, /Execution-denial responses/);
+    assert.match(explain.hookSpecificOutput.additionalContext, new RegExp(eventId));
+    assert.match(label.hookSpecificOutput.additionalContext, /correct/);
     assert.deepEqual(readState('query-session', options.dataDir).contract, before);
-  }
-});
+    assert.equal(fs.readFileSync(file, 'utf8'), rawBefore);
+    assert.equal(fs.statSync(file).mtimeMs, modifiedBefore);
+    assert.equal(readRuntime({ eventId }, options).events[0].label, 'correct');
+
+    for (const example of [
+      `    ${name} label ${eventId} incorrect`,
+      `\t${name} label ${eventId} incorrect`,
+      `\`${name} label ${eventId} incorrect\``,
+      `${name} label\n${eventId} incorrect`
+    ]) {
+      handleHook(prompt('query-session', example), options);
+      assert.equal(readRuntime({ eventId }, options).events[0].label, 'correct', example);
+      assert.deepEqual(readState('query-session', options.dataDir).contract, before);
+    }
+  });
+}
 
 // These fixtures use the model-facing Rust SpawnAgentResult / WaitAgentResult
 // shapes; no host-invented reservation_id or async_launched completion flag.
