@@ -1619,7 +1619,7 @@ module.exports = {
     "ajv": "^8.20.0"
   },
   "dependencies": {
-    "@opencode/schema": "2.0.26",
+    "@opencode/schema": "2.0.30",
     "effect": "4.0.0-rc.112"
   }
 };
@@ -3010,7 +3010,7 @@ __modules["package.json"] = function(module) { module.exports = {
     "ajv": "^8.20.0"
   },
   "dependencies": {
-    "@opencode/schema": "2.0.26",
+    "@opencode/schema": "2.0.30",
     "effect": "4.0.0-rc.112"
   }
 }; };
