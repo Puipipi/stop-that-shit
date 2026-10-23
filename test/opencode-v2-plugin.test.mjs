@@ -135,6 +135,21 @@ test('V2 follows an editable host agent for a new plain root prompt but not a qu
   assert.equal((await before())._tag, 'Success');
 });
 
+for (const instruction of ['review only; do not edit anything', '只审查，不要修改任何文件']) {
+  test(`V2 preserves explicit read-only intent under an editable host agent: ${instruction}`, async t => {
+    const h = await host(t);
+    const before = () => h.run(Effect.result(h.hooks.tool['execute.before'](write())));
+    h.messages.get('root').push(user('start', '$stop-that-shit change'));
+    assert.equal((await before())._tag, 'Success');
+    h.messages.get('root').push(user('review', instruction));
+    const denied = await before();
+    assert.equal(denied._tag, 'Failure');
+    assert.match(denied.failure.message, /MODE_FORBIDS_MUTATION/);
+    h.messages.get('root').push(user('change', 'Fix the reported defect.'));
+    assert.equal((await before())._tag, 'Success');
+  });
+}
+
 test('V2 follows session permission overrides when inferring editable host mode', async (t) => {
   const h = await host(t);
   const before = () => h.run(Effect.result(h.hooks.tool['execute.before'](write())));

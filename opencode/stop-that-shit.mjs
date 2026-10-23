@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { directiveErrorText, mentionsDirective, resolveDataDir } from './runtime.mjs';
+import { allowsHostPromotion, directiveErrorText, resolveDataDir } from './runtime.mjs';
 import * as Effect from 'effect/Effect';
 
 const require = createRequire(import.meta.url);
@@ -219,13 +219,15 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
   // message that is not a $stop-that-shit directive arrives under an
   // edit-capable agent while the contract is review, advance the contract to
   // change so the host's build mode and the guard no longer deadlock.
-  async function advanceReviewOnEditableAgent(controlSessionID, info) {
+  async function advanceReviewOnEditableAgent(controlSessionID, info, text) {
     const current = readState(controlSessionID, dataDir);
-    if (current.directiveError || current.contract.mode !== 'review') return false;
+    if (current.directiveError || current.contract.mode !== 'review'
+        || !allowsHostPromotion(text, current.contract)) return false;
     const agentName = info && info.agent;
     if (!agentName || !(await agentAllowsEdits(agentName))) return false;
     return updateSession(controlSessionID, dataDir, (state) => {
-      if (state.directiveError || state.contract.mode !== 'review') return false;
+      if (state.directiveError || state.contract.mode !== 'review'
+          || !allowsHostPromotion(text, state.contract)) return false;
       state.contract = { ...state.contract, mode: 'change', source: 'host' };
       return true;
     });
@@ -248,7 +250,7 @@ export const StopThatShitPlugin = async ({ client, directory }, options = {}) =>
       };
       const output = { message: info || {}, parts: [{ type: 'text', text }] };
       result = handleOpenCodeMessage(input, output, { controlSessionID, directory }, { dataDir });
-      if (!mentionsDirective(text) && await advanceReviewOnEditableAgent(controlSessionID, info)) {
+      if (await advanceReviewOnEditableAgent(controlSessionID, info, text)) {
         result = null;
       }
       lastAppliedMessage.set(controlSessionID, sequence);

@@ -1,5 +1,9 @@
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+const { parseContractPrompt } = require('../src/contracts.cjs');
 
 export function resolveDataDir(options) {
   if (typeof options.dataDir === 'string' && options.dataDir) return options.dataDir;
@@ -12,6 +16,10 @@ export function resolveDataDir(options) {
 // The parser, rather than a mention inside a quote, owns contract changes.
 export function mentionsDirective(text) {
   return /\$stop-that-shit\b/i.test(String(text || ''));
+}
+
+export function allowsHostPromotion(text, contract) {
+  return !mentionsDirective(text) && !parseContractPrompt(text, contract).correction;
 }
 
 export function directiveErrorText(error) {
