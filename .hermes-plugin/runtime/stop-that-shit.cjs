@@ -358,7 +358,7 @@ function decisionMessage(result, contract, event, responseOutcome, analysisReaso
 }
 
 function runtimeCommand(prompt) {
-  const match = /^(?:[ \t]*\r?\n)* {0,3}\$stop-that-shit[ \t]+(status|runtime(?:[ \t]+all)?|explain[ \t]+(evt_[0-9a-f-]+)|label[ \t]+(evt_[0-9a-f-]+)[ \t]+(correct|incorrect|inconclusive))[ \t]*(?:\r?\n[ \t]*)*$/i.exec(prompt);
+  const match = /^(?:[ \t]*\r?\n)* {0,3}\$(?:stop-that-shit:)?stop-that-shit[ \t]+(status|runtime(?:[ \t]+all)?|explain[ \t]+(evt_[0-9a-f-]+)|label[ \t]+(evt_[0-9a-f-]+)[ \t]+(correct|incorrect|inconclusive))[ \t]*(?:\r?\n[ \t]*)*$/i.exec(prompt);
   if (!match) return null;
   const words = match[1].toLowerCase().split(/\s+/);
   return { name: words[0], all: words[1] === 'all', eventId: match[2] || match[3] || null, label: match[4] || null };
@@ -615,7 +615,7 @@ function directiveHead(prompt, matchEnd) {
 function parseDirective(prompt) {
   // A directive starts the first non-empty line, outside quoted/code content.
   // Four spaces or a tab denote an indented code example, not an invocation.
-  const mention = /^(?:[ \t]*\r?\n)* {0,3}\$stop-that-shit(?=$|[\s,:])/i.exec(prompt);
+  const mention = /^(?:[ \t]*\r?\n)* {0,3}\$(?:stop-that-shit:)?stop-that-shit(?=$|[\s,:])/i.exec(prompt);
   if (!mention) return null;
 
   const head = directiveHead(prompt, mention.index + mention[0].length);

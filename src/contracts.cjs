@@ -29,7 +29,7 @@ function directiveHead(prompt, matchEnd) {
 function parseDirective(prompt) {
   // A directive starts the first non-empty line, outside quoted/code content.
   // Four spaces or a tab denote an indented code example, not an invocation.
-  const mention = /^(?:[ \t]*\r?\n)* {0,3}\$stop-that-shit(?=$|[\s,:])/i.exec(prompt);
+  const mention = /^(?:[ \t]*\r?\n)* {0,3}\$(?:stop-that-shit:)?stop-that-shit(?=$|[\s,:])/i.exec(prompt);
   if (!mention) return null;
 
   const head = directiveHead(prompt, mention.index + mention[0].length);
