@@ -86,9 +86,10 @@ function hasParentSession(exec) {
 // holds a contract, because a delegated prompt is not translated.
 //
 // `resolveRootLineage` walks up the parent chain using a caller-supplied session
-// lookup. Without it, or when the lookup cannot reach a session with no parent,
-// the root is unverifiable and the call is refused rather than keyed by an
-// intermediate child that holds no contract.
+// lookup. Without it, when the lookup cannot reach a session with no parent, or
+// when any session on the chain cannot be resolved, the root is unverifiable
+// and the call is refused rather than keyed by an intermediate child that holds
+// no contract.
 function resolveRootLineage(sessionId, getSessionById) {
   // Without a session lookup we cannot walk past the current session, so the
   // root is unverifiable and the call is refused rather than trusted.
@@ -99,8 +100,13 @@ function resolveRootLineage(sessionId, getSessionById) {
   while (current && !seen.has(current)) {
     seen.add(current);
     const session = getSessionById(current);
-    const header = session && session.header;
-    const parent = header && header.parentSession;
+    // A lookup that returns no session (or an unreadable shape without a
+    // header) cannot distinguish "this session has no parent" from "the
+    // parent is unreachable", so accepting it as the root would fail open.
+    // Refuse the whole chain instead: only a resolvable parentless session
+    // is a verified root.
+    if (!session || !session.header) return null;
+    const parent = session.header.parentSession;
     if (!parent) return current;
     current = parent;
   }

@@ -1037,3 +1037,80 @@ test('Regression: resolveRootLineage stops at a cycle and returns null', () => {
   // No lookup available means the root is unverifiable.
   assert.equal(resolveRootLineage('child'), null);
 });
+
+test('Regression: resolveRootLineage fails closed when a lookup returns no session', () => {
+  const sessions = {
+    root: { id: 'root', header: {} },
+    child: { id: 'child', header: { parentSession: 'root' } },
+    grandchild: { id: 'grandchild', header: { parentSession: 'child' } }
+  };
+
+  // A missing current session is not a verified root.
+  assert.equal(resolveRootLineage('gone', (id) => sessions[id]), null);
+
+  // A missing intermediate hop must not be returned as the root: that is how
+  // a grandchild write would slip past the root contract.
+  const missingChild = { root: sessions.root, grandchild: sessions.grandchild };
+  assert.equal(resolveRootLineage('grandchild', (id) => missingChild[id]), null);
+
+  // A missing topmost parent fails the same way.
+  const missingRoot = { child: sessions.child, grandchild: sessions.grandchild };
+  assert.equal(resolveRootLineage('grandchild', (id) => missingRoot[id]), null);
+
+  // An unreadable session shape (no header) cannot prove it is parentless.
+  assert.equal(resolveRootLineage('bare', () => ({ id: 'bare' })), null);
+
+  // A resolvable session with no parent is still a verified root.
+  assert.equal(resolveRootLineage('child', () => ({ id: 'child', header: {} })), 'child');
+});
+
+test('Regression: a delegated write is denied when the store cannot resolve an intermediate session', async (t) => {
+  // Reviewer reproduction: a review contract on the root, a grandchild whose
+  // immediate parent the session store cannot resolve, and a real downstream
+  // write callback. The write must be denied and the target file must not be
+  // created; only the complete chain may be keyed to the root contract.
+  const options = workspace(t);
+  start('root', options);
+  handleDshHook('agent/pre-step', fromNativeEvent('agent/pre-step', {
+    agent: { session: { id: 'root' } },
+    messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '$stop-that-shit review files=src/** -- look' }] }],
+    turn: 1
+  }), options);
+
+  const writeRoot = mkdtempSync(path.join(os.tmpdir(), 'sts-dsh-write-'));
+  t.after(() => fs.rmSync(writeRoot, { recursive: true, force: true }));
+
+  const sessions = {
+    root: { id: 'root', header: {} },
+    grandchild: { id: 'grandchild', header: { parentSession: 'child' } }
+  };
+  const resolveRoot = (sessionId) => resolveRootLineage(sessionId, (id) => sessions[id]);
+
+  const exec = {
+    name: 'write',
+    arguments: { file_path: 'docs/other.md', content: 'x' },
+    callId: 'f1',
+    agent: { session: sessions.grandchild }
+  };
+  const target = path.join(writeRoot, 'docs', 'other.md');
+  let downstreamRan = false;
+  const decision = await applyDshDecision(
+    'tools/pre-execute',
+    handleDshHook(
+      'tools/pre-execute',
+      fromNativeEvent('tools/pre-execute', exec, { resolveRootSession: resolveRoot }),
+      options
+    ),
+    async () => {
+      downstreamRan = true;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, 'x');
+      return { kind: 'pass' };
+    }
+  );
+
+  assert.equal(decision.kind, 'deny');
+  assert.match(decision.reason, /verified root session/);
+  assert.equal(downstreamRan, false);
+  assert.equal(fs.existsSync(target), false);
+});

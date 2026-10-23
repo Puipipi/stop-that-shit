@@ -439,11 +439,14 @@ function rootOf(sessionId, getSessionById) {
   while (current && !seen.has(current)) {
     seen.add(current);
     const session = getSessionById(current);
-    const header = session && session.header;
-    if (!header || !header.parentSession) return current;
-    current = header.parentSession;
+    // A session the store cannot resolve (or one without a readable header)
+    // cannot prove it has no parent. Accepting it as the root would fail
+    // open, so refuse the whole chain instead.
+    if (!session || !session.header) return null;
+    if (!session.header.parentSession) return current;
+    current = session.header.parentSession;
   }
-  return null; // cycle or unreachable: fail closed
+  return null; // cycle, unresolvable hop, or unreachable root: fail closed
 }
 
 // Tools waterfall: (exec, next). `rootSessionId` is REQUIRED whenever the

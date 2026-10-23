@@ -215,6 +215,23 @@ checkFalsy('grandchild read proceeds (null)', read)
 const explicit = s3.gate('write', outOfScopeArgs, 'g4', { rootSessionId: 'root' }, grandchild)
 checkMatch('explicit rootSessionId still denies', explicit, /MODE_FORBIDS_MUTATION/)
 
+// A lookup that returns no session must fail closed, not accept the gap as
+// a root. These were the missed cases: every fixture above was resolvable.
+const missingCurrent = resolveRootLineage('gone', (id) => sessions[id])
+check('lineage: missing current lookup returns null', missingCurrent, null)
+
+const brokenStore = { root: sessions.root, grandchild: sessions.grandchild }
+const missingHop = resolveRootLineage('grandchild', (id) => brokenStore[id])
+check('lineage: missing intermediate hop returns null', missingHop, null)
+
+const noRootStore = { child: sessions.child, grandchild: sessions.grandchild }
+const missingTop = resolveRootLineage('grandchild', (id) => noRootStore[id])
+check('lineage: missing topmost parent returns null', missingTop, null)
+
+const brokenResolve = (sessionId) => resolveRootLineage(sessionId, (id) => brokenStore[id])
+const brokenWrite = s3.gate('write', outOfScopeArgs, 'g5', { resolveRootSession: brokenResolve }, grandchild)
+checkMatch('broken chain grandchild write refused', brokenWrite, /verified root session/)
+
 checkTruthy('resolveRootLineage exported', typeof resolveRootLineage === 'function')
 
 // ---- 6. Full root → child → grandchild with authorized in-scope write ----
