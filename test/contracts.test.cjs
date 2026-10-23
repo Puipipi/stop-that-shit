@@ -50,6 +50,30 @@ test('explicit review directive enables guard by default', () => {
   assert.equal(result.contract.hashPolicy, 'deny');
 });
 
+test('Codex namespaced directives match short directives and preserve field boundaries', () => {
+  const previous = parseContractPrompt('$stop-that-shit review -- inspect').contract;
+  for (const prefix of ['', '\n', '\r\n\r\n   ']) {
+    for (const head of [
+      'answer', 'review', 'monitor', 'open',
+      'lock change agents=0 files=src/Config.cjs|test/** deps=deny hash=allow', 'off'
+    ]) {
+      const short = `${prefix}$stop-that-shit ${head} -- task`;
+      const namespaced = short.replace('$stop-that-shit', '$stop-that-shit:stop-that-shit');
+      assert.deepEqual(parseContractPrompt(namespaced, previous), parseContractPrompt(short, previous), namespaced);
+    }
+  }
+  for (const separator of ['\n', '\r\n', ' -- ', ': ']) {
+    const result = parseContractPrompt(`$stop-that-shit:stop-that-shit${separator}change hash=allow`, previous);
+    assert.deepEqual(result.contract, previous, separator);
+  }
+  for (const name of [
+    '$stop-that-shit:other', '$other:stop-that-shit',
+    '$stop-that-shit:stop-that-shit-example', '$stop-that-shit:stop-that-shit:other'
+  ]) {
+    assert.deepEqual(parseContractPrompt(`${name} change -- task`, previous).contract, previous, name);
+  }
+});
+
 test('hash policy defaults to deny and accepts an explicit override', () => {
   assert.equal(defaultContract().hashPolicy, 'deny');
   const result = parseContractPrompt('$stop-that-shit change hash=allow -- add the required release checksum');
@@ -175,22 +199,24 @@ test('off remains off before a mode is confirmed', () => {
 });
 
 test('quoted, embedded, and code examples do not update the contract', () => {
-  const command = '$stop-that-shit off change agents=9 hash=allow deps=allow files=** -- example';
-  const examples = [
-    `请解释这段示例：${command}，不执行`,
-    `Explain this example: ${command}`,
-    `"${command}"`,
-    `'${command}'`,
-    `\`${command}\``,
-    `> ${command}`,
-    `- ${command}`,
-    `\`\`\`text\n${command}\n\`\`\``,
-    `~~~text\n${command}\n~~~`,
-    `    ${command}`,
-    `\t${command}`,
-    `Example:\n${command}`,
-    command.replace('$stop-that-shit', '$stop-that-shit-example')
-  ];
+  const examples = ['$stop-that-shit', '$stop-that-shit:stop-that-shit'].flatMap(name => {
+    const command = `${name} off change agents=9 hash=allow deps=allow files=** -- example`;
+    return [
+      `请解释这段示例：${command}，不执行`,
+      `Explain this example: ${command}`,
+      `"${command}"`,
+      `'${command}'`,
+      `\`${command}\``,
+      `> ${command}`,
+      `- ${command}`,
+      `\`\`\`text\n${command}\n\`\`\``,
+      `~~~text\n${command}\n~~~`,
+      `    ${command}`,
+      `\t${command}`,
+      `Example:\n${command}`,
+      command.replace('$stop-that-shit', '$stop-that-shit-example')
+    ];
+  });
   for (const previous of [defaultContract(), {
     ...defaultContract(), mode: 'review', level: 'lock', agentBudget: 0,
     allowedPaths: ['src/config.cjs']

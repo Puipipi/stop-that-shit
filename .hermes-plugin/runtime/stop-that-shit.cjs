@@ -358,7 +358,7 @@ function decisionMessage(result, contract, event, responseOutcome, analysisReaso
 }
 
 function runtimeCommand(prompt) {
-  const match = /^(?:[ \t]*\r?\n)* {0,3}\$stop-that-shit[ \t]+(status|runtime(?:[ \t]+all)?|explain[ \t]+(evt_[0-9a-f-]+)|label[ \t]+(evt_[0-9a-f-]+)[ \t]+(correct|incorrect|inconclusive))[ \t]*(?:\r?\n[ \t]*)*$/i.exec(prompt);
+  const match = /^(?:[ \t]*\r?\n)* {0,3}\$(?:stop-that-shit:)?stop-that-shit[ \t]+(status|runtime(?:[ \t]+all)?|explain[ \t]+(evt_[0-9a-f-]+)|label[ \t]+(evt_[0-9a-f-]+)[ \t]+(correct|incorrect|inconclusive))[ \t]*(?:\r?\n[ \t]*)*$/i.exec(prompt);
   if (!match) return null;
   const words = match[1].toLowerCase().split(/\s+/);
   return { name: words[0], all: words[1] === 'all', eventId: match[2] || match[3] || null, label: match[4] || null };
@@ -615,7 +615,7 @@ function directiveHead(prompt, matchEnd) {
 function parseDirective(prompt) {
   // A directive starts the first non-empty line, outside quoted/code content.
   // Four spaces or a tab denote an indented code example, not an invocation.
-  const mention = /^(?:[ \t]*\r?\n)* {0,3}\$stop-that-shit(?=$|[\s,:])/i.exec(prompt);
+  const mention = /^(?:[ \t]*\r?\n)* {0,3}\$(?:stop-that-shit:)?stop-that-shit(?=$|[\s,:])/i.exec(prompt);
   if (!mention) return null;
 
   const head = directiveHead(prompt, mention.index + mention[0].length);
@@ -932,8 +932,9 @@ function reserveDelegation(state, reservationId, actionId, count) {
   const normalizedActionId = String(actionId || '');
   const priorCount = acceptedActionCount(state, normalizedActionId);
   if (priorCount !== null) return state;
-  const accepted = { ...acceptedActions(state) };
-  if (normalizedActionId) accepted[normalizedActionId] = count;
+  const accepted = normalizedActionId
+    ? { ...acceptedActions(state), [normalizedActionId]: count }
+    : { ...acceptedActions(state) };
   return {
     ...state,
     acceptedActions: accepted,
@@ -1693,7 +1694,9 @@ function runtimeRoot(options = {}) {
 
 function appendJsonl(file, record) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+  // Isolate this record from an interrupted prior append without rewriting the
+  // damaged evidence or racing another writer's tail check. Readers skip blanks.
+  fs.appendFileSync(file, `\n${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
 function scanJsonl(file, onRecord) {
@@ -2039,14 +2042,15 @@ function normalizeDelegation(value) {
       };
     }
   }
-  const acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
+  let acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
     ? Object.fromEntries(Object.entries(source.acceptedActions)
       .filter(([actionId, count]) => typeof actionId === 'string' && actionId
         && Number.isSafeInteger(count) && count >= 0))
     : {};
   for (const reservation of Object.values(reservations)) {
     if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
-    acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
+    acceptedActions = { ...acceptedActions,
+      [reservation.actionId]: reservation.pendingCount + reservation.agentIds.length };
   }
   return {
     reservations,

@@ -104,6 +104,11 @@ Do not put an introduction before the directive. Embedded examples do not set
 directive fields. Unknown fields and conflicting values return an error and
 preserve the previous contract; submit a corrected directive before continuing.
 
+Codex skill autocomplete inserts `$stop-that-shit:stop-that-shit`. Both this
+name and `$stop-that-shit` accept the same directives and queries, including
+`status`, `runtime`, `explain`, and `label`. The same entry and field boundaries
+apply to both names.
+
 A standalone directive on a later line produces `DIRECTIVE_NOT_ARMED` context.
 Codex also receives a user-facing `systemMessage`. The directive does not set
 contract fields. Send it first in a separate message, then query

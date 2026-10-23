@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { readJsonl, scanJsonl } = require('../src/runtime-storage.cjs');
+const { appendJsonl, readJsonl, scanJsonl } = require('../src/runtime-storage.cjs');
 
 function logFile(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-jsonl-'));
@@ -31,6 +31,24 @@ test('JSONL reads retain long records and UTF-8 characters across read boundarie
   const second = { text: 'long '.repeat(60000) };
   fs.writeFileSync(file, `${JSON.stringify(first)}\r\n${JSON.stringify(second)}\n{unfinished`);
   assert.deepEqual(readJsonl(file), { records: [first, second], damaged: 1 });
+});
+
+test('JSONL appends preserve the next record after an interrupted tail', t => {
+  const file = logFile(t);
+  appendJsonl(file, { id: 1 });
+  fs.appendFileSync(file, '{"unfinished":');
+  appendJsonl(file, { id: 2 });
+  appendJsonl(file, { id: 3 });
+  assert.deepEqual(readJsonl(file), {
+    records: [{ id: 1 }, { id: 2 }, { id: 3 }], damaged: 1
+  });
+});
+
+test('JSONL appends preserve a complete final record without a newline', t => {
+  const file = logFile(t);
+  fs.writeFileSync(file, '{"id":1}');
+  appendJsonl(file, { id: 2 });
+  assert.deepEqual(readJsonl(file), { records: [{ id: 1 }, { id: 2 }], damaged: 0 });
 });
 
 test('JSONL scanning closes the file and propagates consumer failures', t => {

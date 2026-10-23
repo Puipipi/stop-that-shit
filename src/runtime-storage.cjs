@@ -12,7 +12,9 @@ function runtimeRoot(options = {}) {
 
 function appendJsonl(file, record) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.appendFileSync(file, `${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
+  // Isolate this record from an interrupted prior append without rewriting the
+  // damaged evidence or racing another writer's tail check. Readers skip blanks.
+  fs.appendFileSync(file, `\n${JSON.stringify(record)}\n`, { encoding: 'utf8', mode: 0o600 });
 }
 
 function scanJsonl(file, onRecord) {
