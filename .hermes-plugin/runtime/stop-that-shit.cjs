@@ -932,8 +932,9 @@ function reserveDelegation(state, reservationId, actionId, count) {
   const normalizedActionId = String(actionId || '');
   const priorCount = acceptedActionCount(state, normalizedActionId);
   if (priorCount !== null) return state;
-  const accepted = { ...acceptedActions(state) };
-  if (normalizedActionId) accepted[normalizedActionId] = count;
+  const accepted = normalizedActionId
+    ? { ...acceptedActions(state), [normalizedActionId]: count }
+    : { ...acceptedActions(state) };
   return {
     ...state,
     acceptedActions: accepted,
@@ -2041,14 +2042,15 @@ function normalizeDelegation(value) {
       };
     }
   }
-  const acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
+  let acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
     ? Object.fromEntries(Object.entries(source.acceptedActions)
       .filter(([actionId, count]) => typeof actionId === 'string' && actionId
         && Number.isSafeInteger(count) && count >= 0))
     : {};
   for (const reservation of Object.values(reservations)) {
     if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
-    acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
+    acceptedActions = { ...acceptedActions,
+      [reservation.actionId]: reservation.pendingCount + reservation.agentIds.length };
   }
   return {
     reservations,

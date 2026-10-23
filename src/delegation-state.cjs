@@ -46,8 +46,9 @@ function reserveDelegation(state, reservationId, actionId, count) {
   const normalizedActionId = String(actionId || '');
   const priorCount = acceptedActionCount(state, normalizedActionId);
   if (priorCount !== null) return state;
-  const accepted = { ...acceptedActions(state) };
-  if (normalizedActionId) accepted[normalizedActionId] = count;
+  const accepted = normalizedActionId
+    ? { ...acceptedActions(state), [normalizedActionId]: count }
+    : { ...acceptedActions(state) };
   return {
     ...state,
     acceptedActions: accepted,
