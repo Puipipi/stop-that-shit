@@ -45,6 +45,24 @@ test('a partial state write preserves the contract and ledger, cleans up, and re
   assert.equal(recovered.delegation.reservations['reservation:running-call'].pendingCount, 1);
 });
 
+test('legacy migration preserves a prototype-named action ID in the accepted ledger', t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-prototype-migration-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const state = freshState();
+  state.schemaVersion = 3;
+  delete state.delegation.acceptedActions;
+  state.delegation.reservations['reservation:legacy'] = {
+    actionId: '__proto__', pendingCount: 1, agentIds: []
+  };
+  writeState('legacy-prototype', state, dataDir);
+  const migrated = readState('legacy-prototype', dataDir);
+  assert.equal(migrated.storageError, undefined);
+  assert.equal(Object.hasOwn(migrated.delegation.acceptedActions, '__proto__'), true);
+  assert.equal(migrated.delegation.acceptedActions.__proto__, 1);
+  writeState('legacy-prototype', migrated, dataDir);
+  assert.equal(readState('legacy-prototype', dataDir).storageError, undefined);
+});
+
 test('saved and in-memory legacy contracts preserve the same agent limit and authority', (t) => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-contract-migration-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));

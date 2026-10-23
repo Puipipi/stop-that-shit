@@ -31,6 +31,23 @@ test('status exposes effective constraints and denials explain the conflicting f
   assert.equal(allowed.kind, 'none');
 });
 
+test('prototype-named action IDs survive persistence, enforce capacity and remain deduplicated', t => {
+  const directory = dataDir(t);
+  const call = (kind, fields) => handleControlEvent({
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'prototype-id', kind, ...fields
+  }, { dataDir: directory });
+  call('prompt.submit', { prompt: '$stop-that-shit change agents=1' });
+  const launch = id => call('action.before', {
+    action: { id, name: 'Agent', mutability: 'delegate', delegationCount: 1 }
+  });
+  assert.equal(launch('__proto__').kind, 'none');
+  assert.equal(readState('prototype-id', directory).storageError, undefined);
+  assert.equal(launch('next').decision.reasonCode, 'AGENT_BUDGET_EXHAUSTED');
+  call('action.after', { action: { id: '__proto__', lifecycle: 'joined' } });
+  assert.equal(launch('__proto__').decision.reasonCode, 'DUPLICATE_ACTION_ID');
+  assert.equal(launch('next').kind, 'none');
+});
+
 test('damaged control state retains its evidence and offers read-only recovery instead of fresh authority', t => {
   const directory = dataDir(t);
   const { statePath } = require('../src/state.cjs');

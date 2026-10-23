@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
   activeDelegationCount,
+  acceptedActionCount,
   bindSubagent,
   clearDelegations,
   releaseReservation,
@@ -25,6 +26,15 @@ test('reservation increases active count by the requested batch size', () => {
     agentIds: []
   });
   assert.equal(activeDelegationCount(next), 2);
+});
+
+test('prototype-named action IDs are recorded as own ledger entries', () => {
+  for (const actionId of ['__proto__', 'constructor', 'toString']) {
+    const state = reserveDelegation(emptyDelegation(), `reservation:${actionId}`, actionId, 1);
+    assert.equal(Object.hasOwn(state.acceptedActions, actionId), true);
+    assert.equal(acceptedActionCount(state, actionId), 1);
+    assert.equal(Object.getPrototypeOf(state.acceptedActions), Object.prototype);
+  }
 });
 
 test('an agent binds once and duplicate starts do not increase activity', () => {
