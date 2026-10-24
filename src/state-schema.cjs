@@ -56,14 +56,15 @@ function normalizeDelegation(value) {
       };
     }
   }
-  const acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
+  let acceptedActions = source.acceptedActions && typeof source.acceptedActions === 'object'
     ? Object.fromEntries(Object.entries(source.acceptedActions)
       .filter(([actionId, count]) => typeof actionId === 'string' && actionId
         && Number.isSafeInteger(count) && count >= 0))
     : {};
   for (const reservation of Object.values(reservations)) {
     if (!reservation.actionId || Object.prototype.hasOwnProperty.call(acceptedActions, reservation.actionId)) continue;
-    acceptedActions[reservation.actionId] = reservation.pendingCount + reservation.agentIds.length;
+    acceptedActions = { ...acceptedActions,
+      [reservation.actionId]: reservation.pendingCount + reservation.agentIds.length };
   }
   return {
     reservations,

@@ -589,6 +589,30 @@ test('an edit-capable agent message advances a review contract to change', async
   assert.match(injection.parts[0].text, /mode=change/);
 });
 
+for (const instruction of ['review only; do not edit anything', '只审查，不要修改任何文件']) {
+  test(`explicit read-only intent wins over an editable host agent: ${instruction}`, async (t) => {
+    const sessions = { root: { id: 'root' } };
+    const messages = {
+      start: message('root', 'start', '$stop-that-shit change -- implement'),
+      review: message('root', 'review', instruction),
+      change: message('root', 'change', 'Fix the reported defect.')
+    };
+    const { dataDir, hooks } = await plugin(t, sessions, messages);
+    const edit = () => hooks['tool.execute.before'](
+      { tool: 'write', sessionID: 'root', callID: 'write-readonly-intent' },
+      { args: { filePath: '/repo/a.txt', content: 'changed' } }
+    );
+
+    await sendPartEvent(hooks, messages.start.parts[0]);
+    await sendPartEvent(hooks, messages.review.parts[0]);
+    assert.equal(readState('root', dataDir).contract.mode, 'review');
+    await assert.rejects(edit(), /MODE_FORBIDS_MUTATION/);
+
+    await sendPartEvent(hooks, messages.change.parts[0]);
+    await assert.doesNotReject(edit());
+  });
+}
+
 test('explicit directives win over the host agent switch', async (t) => {
   const sessions = { root: { id: 'root' } };
   const messages = {

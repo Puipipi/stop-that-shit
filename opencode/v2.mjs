@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { Effect, Semaphore, Stream } from 'effect';
 import { Tool } from '@opencode/schema/tool';
-import { directiveErrorText, mentionsDirective, resolveDataDir } from './runtime.mjs';
+import { allowsHostPromotion, directiveErrorText, resolveDataDir } from './runtime.mjs';
 
 const require = createRequire(import.meta.url);
 const { handleOpenCodeMessage, handleOpenCodeSessionEnd, toSubagentStopEvent } = require('../src/adapters/opencode-hooks.cjs');
@@ -55,14 +55,17 @@ export const openCodeV2Effect = (ctx) => Effect.gen(function* () {
           yield* ctx.storage.set(`reply:${root.id}`, response.text);
         }
         const state = readState(root.id, dataDir);
-        if (message === users.at(-1) && root.agent && !mentionsDirective(message.text)
+        if (message === users.at(-1) && root.agent && allowsHostPromotion(message.text, state.contract)
             && state.contract.mode === 'review' && !state.directiveError) {
           const agent = yield* ctx.agent.get({ agentID: root.agent, location: { directory: root.location.directory } });
           const permissions = [...agent.data.permissions, ...(root.permissions ?? [])];
           const edit = permissions.filter((rule) => ['*', 'edit'].includes(rule.action) && rule.resource === '*').at(-1);
           if (edit && edit.effect !== 'deny') {
             updateSession(root.id, dataDir, (latest) => {
-              if (latest.contract.mode === 'review' && !latest.directiveError) latest.contract = { ...latest.contract, mode: 'change', source: 'host' };
+              if (latest.contract.mode === 'review' && !latest.directiveError
+                  && allowsHostPromotion(message.text, latest.contract)) {
+                latest.contract = { ...latest.contract, mode: 'change', source: 'host' };
+              }
             });
           }
         }

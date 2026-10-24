@@ -121,6 +121,27 @@ test('runtime reader tolerates a damaged final JSONL record', (t) => {
   assert.equal(runtime.summary.damagedRecords, 1);
 });
 
+test('runtime events and labels remain readable after interrupted log tails', t => {
+  const directory = dataDir(t);
+  const options = { dataDir: directory };
+  const first = recordDecision(facts(), options);
+  const log = path.join(directory, 'runtime', `${sessionKey(facts().sessionId)}.jsonl`);
+  fs.appendFileSync(log, '{"unfinished":');
+  const second = recordDecision(facts(), options);
+  assert.ok(second);
+
+  recordAnnotation(second.eventId, 'incorrect', options);
+  fs.appendFileSync(path.join(directory, 'runtime', 'annotations.jsonl'), '{"unfinished":');
+  const label = recordAnnotation(second.eventId, 'correct', options);
+  assert.ok(label);
+
+  const runtime = readRuntime({}, options);
+  assert.deepEqual(runtime.events.map(event => event.eventId), [first.eventId, second.eventId]);
+  assert.equal(runtime.events[1].label, 'correct');
+  assert.equal(runtime.annotations.length, 2);
+  assert.equal(runtime.summary.damagedRecords, 2);
+});
+
 test('runtime reader handles a large session log and retains filtered labels and damage counts', t => {
   const directory = dataDir(t);
   const first = recordDecision(facts(), { dataDir: directory });

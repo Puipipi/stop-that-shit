@@ -272,7 +272,9 @@ under an edit-capable agent (resolved through `client.app.agents()`; unknown age
 open) while the contract is `review`, the plugin advances the contract to
 `change` with `source: host`, preserving file, dependency, and hash settings.
 Quoted and embedded mentions suppress that promotion without becoming direct
-authorization. Multipart text is joined with newlines; later parts cannot add
+authorization. Explicit natural-language task corrections also take precedence
+over editable-agent promotion, including a renewed read-only instruction.
+Multipart text is joined with newlines; later parts cannot add
 directive fields to the first line. Explicit directives always win. Read-only
 agents and subagent messages never advance the root contract. The host permission layer
 continues to apply independently.
