@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-// Standalone live verification of the DSH host adapter against realistic
-// DSH native event payloads. Uses the real adapter modules (not simulation).
+// Standalone adapter checks with synthetic DSH native-shaped event payloads.
+// Uses the real adapter modules without starting a Harness instance.
 //
-// Run:
-//   cd /root/projects/dsh-plugins/work-stop-that-shit
-//   NODE_ENV=development node scripts/verify-dsh-live.mjs
+// Run from the repository root:
+//   node scripts/verify-dsh-live.mjs
 //
 // Every check uses the real `fromNativeEvent` → `handleDshHook` →
 // `applyDshDecision` pipeline on native-shaped DSH payloads (ToolExecution,
