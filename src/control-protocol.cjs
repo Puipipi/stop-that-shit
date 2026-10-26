@@ -106,6 +106,17 @@ function assertControlEvent(event) {
     }
   }
 
+  if (event.agent !== undefined) {
+    if (!event.agent || typeof event.agent !== 'object' || Array.isArray(event.agent)) {
+      throw new TypeError('ControlEvent agent must be an object when provided.');
+    }
+    nonEmptyString(event.agent.agentId, 'agent.agentId');
+    if (event.agent.agentType !== null && event.agent.agentType !== undefined
+        && typeof event.agent.agentType !== 'string') {
+      throw new TypeError('ControlEvent agent.agentType must be a string when provided.');
+    }
+  }
+
   if (event.allDelegationsStopped !== undefined && typeof event.allDelegationsStopped !== 'boolean') throw new TypeError('allDelegationsStopped must be boolean.');
   if (event.sourceSessionId !== undefined) nonEmptyString(event.sourceSessionId, 'sourceSessionId');
   if (event.action && event.action.completionScope !== undefined && !['call', 'children'].includes(event.action.completionScope)) {

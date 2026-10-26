@@ -8,6 +8,7 @@ const path = require('node:path');
 const packageJson = require('../package.json');
 const { readRuntime } = require('../src/runtime-audit.cjs');
 const { recordAnnotation } = require('../src/runtime-annotations.cjs');
+const { childStatePath, readState, sessionKey } = require('../src/state.cjs');
 const { validateCaseBundle } = require('./case-bundle-lib.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -81,6 +82,35 @@ async function doctor(dataDir, options = {}) {
   return { ...result, installed: packageJson.version, ...await latestRelease() };
 }
 
+function children(sessionId, dataDir) {
+  const directory = path.dirname(childStatePath(sessionId, 'unused', dataDir));
+  let names;
+  try {
+    names = fs.readdirSync(directory).filter(name => name.endsWith('.json')).sort();
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    names = [];
+  }
+  return {
+    schemaVersion: 1,
+    sessionKey: sessionKey(sessionId),
+    children: names.map((name) => {
+      const agentKey = name.slice(0, -'.json'.length);
+      const state = readState(sessionId, dataDir, { agentKey });
+      return {
+        agentKey,
+        mode: state.contract.mode,
+        level: state.contract.level,
+        agentBudget: state.contract.agentBudget,
+        allowedPaths: state.contract.allowedPaths,
+        storageError: state.storageError || null,
+        activeReservations: Object.keys(state.delegation.reservations).length,
+        runtime: readRuntime({ sessionId, agentKey }, { dataDir }).summary
+      };
+    })
+  };
+}
+
 function newCase(id, output) {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id || '')) throw new Error('--id must be a lowercase slug');
   const target = path.resolve(output || path.join(root, 'evals', 'codex-paired', 'cases', id));
@@ -117,6 +147,10 @@ async function main() {
 
   if (command === 'doctor') return print(await doctor(dataDir, options));
   if (command === 'runtime') return print(readRuntime({}, { dataDir }));
+  if (command === 'children') {
+    if (!subcommand) throw new Error('children requires a session key');
+    return print(children(subcommand, dataDir));
+  }
   if (command === 'explain') {
     if (!subcommand) throw new Error('explain requires an event ID');
     const runtime = readRuntime({ eventId: subcommand }, { dataDir });
@@ -141,6 +175,7 @@ async function main() {
     'Usage:',
     '  npm run sts -- doctor [--check-update] [--data-dir <path>]',
     '  npm run sts -- runtime [--data-dir <path>]',
+    '  npm run sts -- children <sessionId> [--data-dir <path>]',
     '  npm run sts -- explain <eventId> [--data-dir <path>]',
     '  npm run sts -- label <eventId> correct|incorrect|inconclusive [--data-dir <path>]',
     '  npm run sts -- case new --id <slug> [--output <path>]',

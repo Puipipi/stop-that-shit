@@ -10,7 +10,7 @@ const { assertControlEvent, PROTOCOL_VERSION, SHELL_ANALYSIS_REASONS } = require
 const { handleControlEvent } = require('../src/controller.cjs');
 const { detectDependencyIntent } = require('../src/adapters/codex-tool-classifier.cjs');
 const { readRuntime } = require('../src/runtime-audit.cjs');
-const { readState } = require('../src/state.cjs');
+const { childStatePath, readState } = require('../src/state.cjs');
 
 function dataDir(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-protocol-'));
@@ -303,6 +303,131 @@ test('Codex prompt hooks reject split directives and accept formal agents syntax
     kind: 'prompt-error',
     message: 'invalid prompt'
   }), { decision: 'block', reason: 'invalid prompt' });
+});
+
+test('Codex subagent prompts create an independent inherited contract', (t) => {
+  const directory = dataDir(t);
+  const parent = {
+    session_id: 'parent-session',
+    hook_event_name: 'UserPromptSubmit'
+  };
+  handleCodexHook({
+    ...parent,
+    prompt: '$stop-that-shit change agents=6 files=src/** -- parent task'
+  }, { dataDir: directory });
+
+  handleCodexHook({
+    ...parent,
+    agent_id: 'child-agent',
+    prompt: '$stop-that-shit answer agents=0 -- child task'
+  }, { dataDir: directory });
+
+  const parentState = readState('parent-session', directory);
+  assert.equal(parentState.contract.mode, 'change');
+  assert.equal(parentState.contract.agentBudget, 6);
+  assert.deepEqual(parentState.contract.allowedPaths, ['src/**']);
+
+  const childState = readState('parent-session', directory, { agentId: 'child-agent' });
+  assert.equal(childState.contract.mode, 'answer');
+  assert.equal(childState.contract.agentBudget, 0);
+  assert.deepEqual(childState.contract.allowedPaths, ['src/**']);
+  assert.ok(fs.existsSync(childStatePath('parent-session', 'child-agent', directory)));
+});
+
+test('a parent message can adjust a child contract without changing the parent', (t) => {
+  const directory = dataDir(t);
+  const parent = {
+    session_id: 'adjust-parent',
+    hook_event_name: 'UserPromptSubmit'
+  };
+  handleCodexHook({
+    ...parent,
+    prompt: '$stop-that-shit change agents=6 -- parent task'
+  }, { dataDir: directory });
+  handleCodexHook({
+    ...parent,
+    agent_id: 'child-agent',
+    prompt: '$stop-that-shit answer agents=0 -- first child request'
+  }, { dataDir: directory });
+  handleCodexHook({
+    ...parent,
+    agent_id: 'child-agent',
+    prompt: '$stop-that-shit change agents=2 -- second child request'
+  }, { dataDir: directory });
+
+  assert.equal(readState('adjust-parent', directory).contract.agentBudget, 6);
+  assert.equal(readState('adjust-parent', directory).contract.mode, 'change');
+  const child = readState('adjust-parent', directory, { agentId: 'child-agent' });
+  assert.equal(child.contract.mode, 'change');
+  assert.equal(child.contract.agentBudget, 2);
+});
+
+test('subagent stop records completion but parent end removes only resolved child state', (t) => {
+  const directory = dataDir(t);
+  const base = { protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2, sessionId: 'cleanup-parent' };
+  const parent = {
+    session_id: 'cleanup-parent',
+    hook_event_name: 'UserPromptSubmit'
+  };
+  handleCodexHook({
+    ...parent,
+    prompt: '$stop-that-shit change agents=6 -- parent task'
+  }, { dataDir: directory });
+  handleCodexHook({
+    ...parent,
+    agent_id: 'child-agent',
+    prompt: '$stop-that-shit answer agents=0 -- child task'
+  }, { dataDir: directory });
+  handleCodexHook({
+    session_id: 'cleanup-parent',
+    hook_event_name: 'PostToolUse',
+    agent_id: 'child-agent',
+    tool_name: 'spawn_agent',
+    tool_use_id: 'spawn-child',
+    tool_response: { agent_id: '00000000-0000-4000-8000-000000000001' }
+  }, { dataDir: directory });
+
+  assert.ok(fs.existsSync(childStatePath('cleanup-parent', 'child-agent', directory)));
+  handleCodexHook({
+    session_id: 'cleanup-parent',
+    hook_event_name: 'SessionEnd',
+    reason: 'other'
+  }, { dataDir: directory });
+  assert.ok(fs.existsSync(childStatePath('cleanup-parent', 'child-agent', directory)));
+
+  handleControlEvent({ ...base, kind: 'subagent.start', agentId: 'child-agent' }, { dataDir: directory });
+  handleControlEvent({ ...base, kind: 'subagent.stop', agentId: 'child-agent' }, { dataDir: directory });
+  handleControlEvent({ ...base, kind: 'session.end' }, { dataDir: directory });
+  assert.equal(fs.existsSync(childStatePath('cleanup-parent', 'child-agent', directory)), false);
+});
+
+test('a child file boundary can be narrowed but cannot be widened by its prompt', (t) => {
+  const directory = dataDir(t);
+  const parent = {
+    session_id: 'child-files',
+    hook_event_name: 'UserPromptSubmit'
+  };
+  handleCodexHook({
+    ...parent,
+    prompt: '$stop-that-shit lock change files=src/**|docs/** -- parent task'
+  }, { dataDir: directory });
+  handleCodexHook({
+    ...parent,
+    agent_id: 'child-agent',
+    prompt: '$stop-that-shit change files=src/config.cjs -- child task'
+  }, { dataDir: directory });
+  assert.deepEqual(readState('child-files', directory, { agentId: 'child-agent' }).contract.allowedPaths,
+    ['src/config.cjs']);
+
+  const widened = handleCodexHook({
+    ...parent,
+    agent_id: 'child-agent',
+    prompt: '$stop-that-shit change files=test/** -- child tries to widen'
+  }, { dataDir: directory });
+  assert.equal(widened.decision, 'block');
+  assert.match(widened.reason, /FILE_BOUNDARY_WIDEN/);
+  assert.deepEqual(readState('child-files', directory, { agentId: 'child-agent' }).contract.allowedPaths,
+    ['src/config.cjs']);
 });
 
 test('Codex Adapter marks only high-confidence hashing actions', () => {

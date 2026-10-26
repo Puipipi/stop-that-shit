@@ -6,7 +6,7 @@ const { inspectDelegation, applyDelegationFact } = require('./delegation-state.c
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
-const { readState, recoveryState, updateSession } = require('./state.cjs');
+const { readState, recoveryState, removeChildState, updateSession } = require('./state.cjs');
 
 function none() {
   return { kind: 'none' };
@@ -109,6 +109,7 @@ function handleRuntimeCommand(command, event, state, options) {
     const summary = inspectDelegation(state.delegation);
     return context([
       'Stop That Shit status',
+      ...(event.agent ? [`Agent: ${event.agent.agentId}`] : []),
       `State: ${activeControlState(state.contract)} / ${state.contract.mode}`,
       contractFields(state.contract, summary),
       `Authority source: ${state.contract.source || 'unconfirmed'}`,
@@ -121,7 +122,9 @@ function handleRuntimeCommand(command, event, state, options) {
     ].join('\n'));
   }
   if (command.name === 'runtime') {
-    const query = command.all ? {} : { sessionId: event.sessionId };
+    const query = command.all ? {} : event.agent
+      ? { sessionId: event.sessionId, agentId: event.agent.agentId }
+      : { sessionId: event.sessionId };
     return context(runtimeSummaryText(readRuntime(query, options)));
   }
   const runtime = readRuntime({ eventId: command.eventId }, options);
@@ -146,6 +149,28 @@ function handleRuntimeCommand(command, event, state, options) {
   ].join('\n'));
 }
 
+function normalizeBoundaryPattern(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+}
+
+function boundaryContains(container, candidate) {
+  container = normalizeBoundaryPattern(container);
+  candidate = normalizeBoundaryPattern(candidate);
+  if (container === '**') return true;
+  if (!container || !candidate || candidate === '**') return false;
+  const containerPrefix = container.endsWith('/**') ? container.slice(0, -3) : null;
+  const candidatePrefix = candidate.endsWith('/**') ? candidate.slice(0, -3) : null;
+  if (containerPrefix === null) return candidatePrefix === null && container === candidate;
+  if (!candidatePrefix) return candidate === containerPrefix || candidate.startsWith(`${containerPrefix}/`);
+  return candidatePrefix === containerPrefix || candidatePrefix.startsWith(`${containerPrefix}/`);
+}
+
+function widensFileBoundary(previous, next) {
+  if (previous === null) return false;
+  if (!Array.isArray(next)) return true;
+  return next.some(pattern => !previous.some(container => boundaryContains(container, pattern)));
+}
+
 function handlePrompt(event, state) {
   if (state.storageError) return context(`${state.storageError.code}: ${state.storageError.message}`);
   const parsed = parseContractPrompt(event.prompt, state.contract);
@@ -155,6 +180,19 @@ function handlePrompt(event, state) {
     state.lastPromptContext = null;
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
+  if (event.agent && widensFileBoundary(state.contract.allowedPaths, parsed.contract.allowedPaths)) {
+    state.directiveError = {
+      code: 'FILE_BOUNDARY_WIDEN',
+      message: 'A subagent can narrow its inherited files= boundary, but cannot widen it.'
+    };
+    state.directiveWarning = null;
+    state.lastPromptContext = null;
+    return {
+      kind: 'prompt-error',
+      error: state.directiveError,
+      message: `${state.directiveError.code}: ${state.directiveError.message}`
+    };
+  }
   state.contract = parsed.contract;
   if (parsed.directive || parsed.correction) state.directiveError = null;
   if (parsed.directive || parsed.correction) state.directiveWarning = parsed.directive ? parsed.warning : null;
@@ -163,6 +201,33 @@ function handlePrompt(event, state) {
   state.lastPromptContext = promptContext;
   if (parsed.warning) return { ...context(promptContext), warning: parsed.warning };
   return repeatedContext ? none() : context(promptContext);
+}
+
+function childScope(event) {
+  return event.agent ? { agentId: event.agent.agentId } : null;
+}
+
+function freshDelegation() {
+  return {
+    reservations: {},
+    agentIdsSeen: [],
+    stoppedAgentIds: [],
+    unresolved: {},
+    acceptedActions: {}
+  };
+}
+
+function ensureChildState(event, options) {
+  const scope = childScope(event);
+  if (!scope) return null;
+  return updateSession(event.sessionId, options.dataDir, (state) => {
+    if (state.storageError || state.contract.source !== 'default' || state.contract.mode !== 'unconfirmed') return state;
+    const parent = readState(event.sessionId, options.dataDir);
+    state.contract = { ...parent.contract };
+    state.delegation = freshDelegation();
+    state.lastPromptContext = null;
+    return state;
+  }, scope);
 }
 
 function handleBeforeAction(event, options) {
@@ -210,11 +275,12 @@ function handleBeforeAction(event, options) {
   // Separate host processes can issue independent agent launches close together.
   // Serialize delegation reservations across Hook processes. Prompt updates
   // and completion handlers use the same lock; pure reads stay unlocked.
+  const scope = childScope(event);
   const { state, result } = options.recoveryError
     ? evaluate(recoveryState(options.recoveryError))
     : changesDelegation
-      ? updateSession(event.sessionId, options.dataDir, evaluate)
-      : evaluate(readState(event.sessionId, options.dataDir));
+      ? updateSession(event.sessionId, options.dataDir, evaluate, scope || {})
+      : evaluate(scope ? readState(event.sessionId, options.dataDir, scope) : readState(event.sessionId, options.dataDir));
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
   const responseOutcome = denied
@@ -222,6 +288,7 @@ function handleBeforeAction(event, options) {
     : result.outcome === 'report_and_defer' ? 'context_returned' : 'none';
   const auditEvent = recordDecision({
     sessionId: event.sessionId,
+    agent: scope ? { agentId: scope.agentId } : undefined,
     action: { ...event.action, delegationCount },
     contract: state.contract,
     delegation: state.delegation,
@@ -240,6 +307,7 @@ function handleBeforeAction(event, options) {
 
 function handleAfterAction(event, options) {
   if (!supportsLifecycleFacts(event)) return none();
+  const scope = childScope(event);
   return updateSession(event.sessionId, options.dataDir, (state) => {
     // Only a declared facts adapter may report binding or completion. A false
     // async flag can be a request parameter and never proves children joined.
@@ -252,7 +320,7 @@ function handleAfterAction(event, options) {
       state.delegation = applyDelegationFact(state.delegation, { kind: 'child_stopped', agentId });
     }
     return none();
-  });
+  }, scope || {});
 }
 
 function handleLifecycleContext(event, options) {
@@ -271,21 +339,33 @@ function handleLifecycleContext(event, options) {
   // without waiting for another writer or rewriting state during shutdown.
   const readOnly = event.kind === 'session.start'
     || event.kind === 'session.end' && event.allDelegationsStopped !== true;
-  return readOnly ? update(readState(event.sessionId, options.dataDir))
+  const result = readOnly ? update(readState(event.sessionId, options.dataDir))
     : updateSession(event.sessionId, options.dataDir, update);
+  if (event.kind === 'session.end') {
+    const state = readState(event.sessionId, options.dataDir);
+    const stopped = new Set(state.delegation.stoppedAgentIds);
+    for (const agentId of stopped) removeChildState(event.sessionId, agentId, options.dataDir);
+  }
+  return result;
 }
 
 function handleControlEvent(rawEvent, options = {}) {
   let event = assertControlEvent(rawEvent);
+  if (event.kind === 'prompt.submit' && event.agent) ensureChildState(event, options);
+  const scope = childScope(event);
   if (event.action && event.action.id && event.sourceSessionId && event.sourceSessionId !== event.sessionId) {
     event = { ...event, action: { ...event.action, id: JSON.stringify([event.sourceSessionId, event.action.id]) } };
   }
   switch (event.kind) {
     case 'prompt.submit': {
       const command = runtimeCommand(event.prompt);
-      return command
-        ? handleRuntimeCommand(command, event, readState(event.sessionId, options.dataDir), options)
-        : updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state));
+      if (command) {
+        const commandState = scope
+          ? readState(event.sessionId, options.dataDir, scope)
+          : readState(event.sessionId, options.dataDir);
+        return handleRuntimeCommand(command, event, commandState, options);
+      }
+      return updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state), scope || {});
     }
     case 'action.before':
       return handleBeforeAction(event, options);

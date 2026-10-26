@@ -24,11 +24,18 @@ function parsedResponse(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
 }
 
+function agentIdentity(input) {
+  const agentId = optionalIdentifier(input.agent_id, input.agentId);
+  if (!agentId) return null;
+  return { agentId, agentType: typeof input.agent_type === 'string' ? input.agent_type : null };
+}
+
 function toControlEvent(input) {
   if (!input || typeof input !== 'object') return null;
   const kind = EVENT_KIND[input.hook_event_name];
   if (!kind) return null;
   const toolName = canonicalCodexToolName(input.tool_name);
+  const agent = agentIdentity(input);
 
   const event = {
     protocolVersion: PROTOCOL_VERSION,
@@ -36,6 +43,7 @@ function toControlEvent(input) {
     kind,
     sessionId: String(input.session_id || ''),
     turnId: input.turn_id || null,
+    agent: agent || undefined,
     host: {
       family: 'codex',
       model: input.model || null,
