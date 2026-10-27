@@ -360,6 +360,50 @@ test('plain prose not starting with the slash form stays on the normal prompt pa
   assert.ok(output === null || !/mode=review/.test(output.hookSpecificOutput.additionalContext));
 });
 
+test('sibling namespaced skills do not become Guard directives', (t) => {
+  const options = workspace(t);
+  const session = 'sibling-slash-submit';
+  handleClaudeHook(prompt(session, '/stop-that-shit:stop-that-shit review -- inspect only'), options);
+  const previous = readState(session, options.dataDir).contract;
+
+  for (const text of [
+    '/stop-that-shit:stss change -- edit this draft',
+    '/stop-that-shit:stss rewrite -- tighten this draft',
+    '/stop-that-shit:stss audit -- inspect this draft',
+    '\n  /STOP-THAT-SHIT:STSS rewrite -- tighten this draft',
+    '/stop-that-shit:other-skill review -- inspect',
+    '/stop-that-shit:stop-that-shit-extra change -- edit'
+  ]) {
+    assert.equal(toControlEvent(prompt(session, text)).prompt, text);
+    const result = handleClaudeHook(prompt(session, text), options);
+    assert.notEqual(result && result.decision, 'block', text);
+    assert.deepEqual(readState(session, options.dataDir).contract, previous, text);
+  }
+
+  const denied = handleClaudeHook(pre(session, 'Write', { file_path: 'draft.md', content: 'x' }), options);
+  assert.equal(denied.hookSpecificOutput.permissionDecision, 'deny');
+});
+
+test('Guard slash names retain whitespace comma and colon separators', (t) => {
+  const options = workspace(t);
+  const cases = [
+    ['/stop-that-shit change -- edit', 'change'],
+    ['/stop-that-shit,change -- edit', 'change'],
+    ['/stop-that-shit change: edit', 'change'],
+    ['/stop-that-shit: inspect', 'unconfirmed'],
+    ['/stop-that-shit:stop-that-shit change -- edit', 'change'],
+    ['/stop-that-shit:stop-that-shit,change -- edit', 'change'],
+    ['/stop-that-shit:stop-that-shit change: edit', 'change'],
+    ['/stop-that-shit:stop-that-shit: inspect', 'unconfirmed']
+  ];
+  for (const [index, [text, mode]] of cases.entries()) {
+    const session = `slash-separator-${index}`;
+    const result = handleClaudeHook(prompt(session, text), options);
+    assert.notEqual(result && result.decision, 'block', text);
+    assert.equal(readState(session, options.dataDir).contract.mode, mode, text);
+  }
+});
+
 test('Claude absolute paths are normalized and file locks enforce only writes', (t) => {
   const options = workspace(t);
   handleClaudeHook(prompt('path-lock', '$stop-that-shit lock change files=src/state.cjs -- edit only state'), options);
