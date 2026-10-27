@@ -41,15 +41,35 @@ pre-expansion arming; the adapter keeps that handler, but the packaged
 
 ## Codex: Skill + Guard
 
-The Guard requires Node.js 18 or newer. Add the repository as a Codex
-marketplace, then install the plugin:
+The Guard requires Node.js 18 or newer. On Windows, download and verify the
+published release ZIP, then add its extracted folder as a local marketplace:
+
+```powershell
+$zip = Join-Path $env:USERPROFILE "Downloads/stop-that-shit-0.2.5.zip"
+$destination = Join-Path $env:USERPROFILE "stop-that-shit-releases"
+Invoke-WebRequest https://github.com/lennney/stop-that-shit/releases/download/0.2.5/stop-that-shit-0.2.5.zip -OutFile $zip
+if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne "6FF3D12A89808FE8E20935A1371E4D94BA40D11B688219E784247394F8C8F319") { throw "Release ZIP checksum mismatch" }
+Expand-Archive -LiteralPath $zip -DestinationPath $destination
+codex plugin marketplace add (Join-Path $destination "stop-that-shit-0.2.5")
+codex plugin add stop-that-shit@stop-that-shit
+```
+
+Keep the extracted folder available to Codex. Update this local release manually
+using the same download and verification steps. Restart Codex and review the
+Hooks as described below. A first install requires review, and a real source
+update can require another review.
+
+Alternatively, add the pinned Git repository as a marketplace:
 
 ```powershell
 codex plugin marketplace add lennney/stop-that-shit --ref 0.2.5
 codex plugin add stop-that-shit@stop-that-shit
 ```
 
-Restart Codex after installation.
+Git-backed installations can trigger another Hook review even when plugin
+source has not changed, because Git metadata can be included in the trust
+fingerprint. See [Codex issue #56793](https://github.com/openai/codex/issues/56793).
+Using the release ZIP avoids that Git metadata; it does not bypass Hook trust.
 
 ## Verify the source
 
@@ -71,7 +91,7 @@ npm run release:check
 
 ## Review the packaged Hooks
 
-Codex records trust for the Hook definition hash, so inspect each Stop That Shit
+Codex records Hook trust, so inspect each Stop That Shit
 command before trusting it. Start a fresh Codex CLI TUI and enter `/hooks`.
 
 Compare the plugin's entries with [`hooks/codex-hooks.json`](hooks/codex-hooks.json).
@@ -91,7 +111,7 @@ release capacity.
 
 Some Codex Desktop builds send `/hooks` as an ordinary message. In that case,
 complete the review in the CLI TUI and restart Desktop. An update may require
-another review because Codex records trust against the Hook definition hash. Do
+another review when the trusted Hook content changes. Do
 not bypass Hook trust for ordinary installation. See the official
 [Codex Hook trust documentation](https://learn.chatgpt.com/docs/hooks#review-and-trust-hooks).
 
