@@ -1,6 +1,6 @@
 'use strict';
 
-const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
+const { DEFAULT_AGENT_LIMIT, boundaryContains, narrowContract, parseContractPrompt } = require('./contracts.cjs');
 const { SHELL_ANALYSIS_REASONS, isShellAnalysisReason, assertControlEvent, supportsLifecycleFacts } = require('./control-protocol.cjs');
 const { inspectDelegation, applyDelegationFact, isActiveAgent } = require('./delegation-state.cjs');
 const { decide } = require('./decision.cjs');
@@ -149,29 +149,13 @@ function handleRuntimeCommand(command, event, state, options) {
   ].join('\n'));
 }
 
-function normalizeBoundaryPattern(value) {
-  return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
-}
-
-function boundaryContains(container, candidate) {
-  container = normalizeBoundaryPattern(container);
-  candidate = normalizeBoundaryPattern(candidate);
-  if (container === '**') return true;
-  if (!container || !candidate || candidate === '**') return false;
-  const containerPrefix = container.endsWith('/**') ? container.slice(0, -3) : null;
-  const candidatePrefix = candidate.endsWith('/**') ? candidate.slice(0, -3) : null;
-  if (containerPrefix === null) return candidatePrefix === null && container === candidate;
-  if (!candidatePrefix) return candidate === containerPrefix || candidate.startsWith(`${containerPrefix}/`);
-  return candidatePrefix === containerPrefix || candidatePrefix.startsWith(`${containerPrefix}/`);
-}
-
 function widensFileBoundary(previous, next) {
   if (previous === null) return false;
   if (!Array.isArray(next)) return true;
   return next.some(pattern => !previous.some(container => boundaryContains(container, pattern)));
 }
 
-function handlePrompt(event, state) {
+function handlePrompt(event, state, parentContract = null) {
   if (state.storageError) return context(`${state.storageError.code}: ${state.storageError.message}`);
   const parsed = parseContractPrompt(event.prompt, state.contract);
   if (parsed.error) {
@@ -193,7 +177,7 @@ function handlePrompt(event, state) {
       message: `${state.directiveError.code}: ${state.directiveError.message}`
     };
   }
-  state.contract = parsed.contract;
+  state.contract = parentContract ? narrowContract(parentContract, parsed.contract) : parsed.contract;
   if (parsed.directive || parsed.correction) state.directiveError = null;
   if (parsed.directive || parsed.correction) state.directiveWarning = parsed.directive ? parsed.warning : null;
   const promptContext = contractContext(state.contract, state.delegation, 'active', parsed.warning || state.directiveWarning, state.storageError);
@@ -219,18 +203,21 @@ function freshDelegation() {
 
 function ensureChildState(event, options) {
   const scope = childScope(event);
-  if (!scope) return null;
-  return updateSession(event.sessionId, options.dataDir, (state) => {
-    if (state.storageError || state.contract.source !== 'default' || state.contract.mode !== 'unconfirmed') return state;
-    const parent = readState(event.sessionId, options.dataDir);
-    state.contract = { ...parent.contract };
-    state.delegation = freshDelegation();
-    state.lastPromptContext = null;
+  if (!scope) return readState(event.sessionId, options.dataDir);
+  const parent = readState(event.sessionId, options.dataDir);
+  const child = updateSession(event.sessionId, options.dataDir, (state) => {
+    if (state.storageError) return state;
+    if (state.contract.source === 'default' && state.contract.mode === 'unconfirmed') {
+      state.delegation = freshDelegation();
+      state.lastPromptContext = null;
+    }
     return state;
   }, scope);
+  child.contract = narrowContract(parent.contract, child.contract);
+  return child;
 }
 
-function handleBeforeAction(event, options) {
+function handleBeforeAction(event, options, effectiveState = null) {
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
   const mayChangeDelegation = event.action.mutability === 'delegate'
@@ -284,8 +271,11 @@ function handleBeforeAction(event, options) {
   const { state, result } = options.recoveryError
     ? evaluate(recoveryState(options.recoveryError))
     : mayChangeDelegation
-      ? updateSession(event.sessionId, options.dataDir, evaluate, scope || {})
-      : evaluate(scope ? readState(event.sessionId, options.dataDir, scope) : readState(event.sessionId, options.dataDir));
+      ? updateSession(event.sessionId, options.dataDir, (state) => {
+        if (scope && effectiveState) state.contract = effectiveState.contract;
+        return evaluate(state);
+      }, scope || {})
+      : evaluate(effectiveState || readState(event.sessionId, options.dataDir));
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
   const responseOutcome = denied
@@ -356,8 +346,8 @@ function handleLifecycleContext(event, options) {
 
 function handleControlEvent(rawEvent, options = {}) {
   let event = assertControlEvent(rawEvent);
-  if (event.kind === 'prompt.submit' && event.agent) ensureChildState(event, options);
   const scope = childScope(event);
+  const effectiveState = scope ? ensureChildState(event, options) : null;
   if (event.action && event.action.id && event.sourceSessionId && event.sourceSessionId !== event.sessionId) {
     event = { ...event, action: { ...event.action, id: JSON.stringify([event.sourceSessionId, event.action.id]) } };
   }
@@ -365,15 +355,14 @@ function handleControlEvent(rawEvent, options = {}) {
     case 'prompt.submit': {
       const command = runtimeCommand(event.prompt);
       if (command) {
-        const commandState = scope
-          ? readState(event.sessionId, options.dataDir, scope)
-          : readState(event.sessionId, options.dataDir);
+        const commandState = effectiveState || readState(event.sessionId, options.dataDir);
         return handleRuntimeCommand(command, event, commandState, options);
       }
-      return updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state), scope || {});
+      return updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state,
+        scope ? readState(event.sessionId, options.dataDir).contract : null), scope || {});
     }
     case 'action.before':
-      return handleBeforeAction(event, options);
+      return handleBeforeAction(event, options, effectiveState);
     case 'action.after':
       return handleAfterAction(event, options);
     case 'session.start':

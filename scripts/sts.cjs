@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const packageJson = require('../package.json');
+const { narrowContract } = require('../src/contracts.cjs');
 const { readRuntime } = require('../src/runtime-audit.cjs');
 const { recordAnnotation } = require('../src/runtime-annotations.cjs');
 const { childStatePath, readState, sessionKey } = require('../src/state.cjs');
@@ -91,18 +92,20 @@ function children(sessionId, dataDir) {
     if (error.code !== 'ENOENT') throw error;
     names = [];
   }
+  const parentContract = readState(sessionId, dataDir).contract;
   return {
     schemaVersion: 1,
     sessionKey: sessionKey(sessionId),
     children: names.map((name) => {
       const agentKey = name.slice(0, -'.json'.length);
       const state = readState(sessionId, dataDir, { agentKey });
+      const contract = narrowContract(parentContract, state.contract);
       return {
         agentKey,
-        mode: state.contract.mode,
-        level: state.contract.level,
-        agentBudget: state.contract.agentBudget,
-        allowedPaths: state.contract.allowedPaths,
+        mode: contract.mode,
+        level: contract.level,
+        agentBudget: contract.agentBudget,
+        allowedPaths: contract.allowedPaths,
         storageError: state.storageError || null,
         activeReservations: Object.keys(state.delegation.reservations).length,
         runtime: readRuntime({ sessionId, agentKey }, { dataDir }).summary

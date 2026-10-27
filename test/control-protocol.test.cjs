@@ -430,6 +430,109 @@ test('a child file boundary can be narrowed but cannot be widened by its prompt'
     ['src/config.cjs']);
 });
 
+test('a child action before its first prompt inherits parent authority', (t) => {
+  const directory = dataDir(t);
+  const session_id = 'child-before-prompt';
+  handleCodexHook({
+    session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock review files=src/** -- inspect'
+  }, { dataDir: directory });
+
+  const denied = handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'apply_patch', tool_use_id: 'write-1',
+    tool_input: { patch: '*** Begin Patch\n*** Update File: src/a.cjs\n@@\n-old\n+new\n*** End Patch' }
+  }, { dataDir: directory });
+  assert.match(denied?.hookSpecificOutput?.permissionDecisionReason, /MODE_FORBIDS_MUTATION/);
+  assert.equal(handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'Bash', tool_use_id: 'read-1', tool_input: { command: 'git status --short' }
+  }, { dataDir: directory }), null);
+});
+
+test('a child prompt cannot promote inherited parent authority', (t) => {
+  const directory = dataDir(t);
+  const session_id = 'child-promotion';
+  handleCodexHook({
+    session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock review files=src/** -- inspect'
+  }, { dataDir: directory });
+  handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit change hash=allow deps=allow agents=2 -- work'
+  }, { dataDir: directory });
+
+  const child = readState(session_id, directory, { agentId: 'child-agent' });
+  assert.equal(child.contract.mode, 'review');
+  assert.equal(child.contract.hashPolicy, 'deny');
+  assert.equal(child.contract.dependencyPolicy, 'ask');
+  assert.deepEqual(child.contract.allowedPaths, ['src/**']);
+  const denied = handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'apply_patch', tool_use_id: 'write-1',
+    tool_input: { patch: '*** Begin Patch\n*** Update File: src/a.cjs\n@@\n-old\n+new\n*** End Patch' }
+  }, { dataDir: directory });
+  assert.match(denied?.hookSpecificOutput?.permissionDecisionReason, /MODE_FORBIDS_MUTATION/);
+});
+
+test('later parent restrictions apply to an existing child without erasing narrower limits', (t) => {
+  const directory = dataDir(t);
+  const session_id = 'parent-restricts-child';
+  handleCodexHook({
+    session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock change files=src/** agents=4 hash=allow deps=allow -- work'
+  }, { dataDir: directory });
+  handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit change files=src/config.cjs agents=1 hash=deny deps=deny -- child work'
+  }, { dataDir: directory });
+  handleCodexHook({
+    session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock review files=src/** agents=2 hash=ask deps=ask -- inspect'
+  }, { dataDir: directory });
+
+  const denied = handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'apply_patch', tool_use_id: 'write-1',
+    tool_input: { patch: '*** Begin Patch\n*** Update File: src/config.cjs\n@@\n-old\n+new\n*** End Patch' }
+  }, { dataDir: directory });
+  assert.match(denied?.hookSpecificOutput?.permissionDecisionReason, /MODE_FORBIDS_MUTATION/);
+
+  const status = handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit status'
+  }, { dataDir: directory });
+  const text = status.hookSpecificOutput.additionalContext;
+  assert.match(text, /mode=review/);
+  assert.match(text, /agents=0\/1 reserved/);
+  assert.match(text, /hash=deny/);
+  assert.match(text, /deps=deny/);
+  assert.match(text, /files=src\/config\.cjs/);
+});
+
+test('a child without its own restriction follows a later parent relaxation', (t) => {
+  const directory = dataDir(t);
+  const session_id = 'parent-relaxes-child';
+  handleCodexHook({
+    session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock review files=src/** -- inspect'
+  }, { dataDir: directory });
+  handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'Bash', tool_use_id: 'read-1', tool_input: { command: 'git status --short' }
+  }, { dataDir: directory });
+  handleCodexHook({
+    session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock change files=src/** -- work'
+  }, { dataDir: directory });
+
+  assert.equal(handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'apply_patch', tool_use_id: 'write-1',
+    tool_input: { patch: '*** Begin Patch\n*** Update File: src/a.cjs\n@@\n-old\n+new\n*** End Patch' }
+  }, { dataDir: directory }), null);
+});
+
 test('Codex Adapter marks only high-confidence hashing actions', () => {
   const hashPatch = toControlEvent({
     session_id: 'session-1', hook_event_name: 'PreToolUse', tool_name: 'apply_patch',
