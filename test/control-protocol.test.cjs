@@ -555,6 +555,22 @@ test('protocol accepts only non-negative integer delegation counts', () => {
   }
 });
 
+test('protocol accepts only non-empty delegation target identifiers', () => {
+  const event = {
+    protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,
+    kind: 'action.before',
+    sessionId: 'session-1',
+    action: { name: 'send_input', mutability: 'control', delegationTargetId: 'agent-1' }
+  };
+  assert.doesNotThrow(() => assertControlEvent(event));
+  for (const delegationTargetId of [null, '', '   ', 42]) {
+    assert.throws(() => assertControlEvent({
+      ...event,
+      action: { ...event.action, delegationTargetId }
+    }), /delegationTargetId/);
+  }
+});
+
 test('protocol requires action identifiers only for delegation before-events', () => {
   assert.doesNotThrow(() => assertControlEvent({
     protocolVersion: PROTOCOL_VERSION, lifecycleVersion: 2,

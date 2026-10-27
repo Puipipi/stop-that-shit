@@ -2,7 +2,7 @@
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
 const { SHELL_ANALYSIS_REASONS, isShellAnalysisReason, assertControlEvent, supportsLifecycleFacts } = require('./control-protocol.cjs');
-const { inspectDelegation, applyDelegationFact } = require('./delegation-state.cjs');
+const { inspectDelegation, applyDelegationFact, isActiveAgent } = require('./delegation-state.cjs');
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
@@ -233,12 +233,17 @@ function ensureChildState(event, options) {
 function handleBeforeAction(event, options) {
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
-  const changesDelegation = event.action.mutability === 'delegate'
+  const mayChangeDelegation = event.action.mutability === 'delegate'
     || event.action.delegationLifecycleUnproven || legacyDelegationProtocol;
   const delegationCount = event.action.mutability === 'delegate'
     ? (Number.isInteger(event.action.delegationCount) ? event.action.delegationCount : 1)
     : 0;
   const evaluate = (state) => {
+    const delegationLifecycleUnproven = Boolean(event.action.delegationLifecycleUnproven)
+      && !(event.action.delegationTargetId
+        && isActiveAgent(state.delegation, event.action.delegationTargetId));
+    const changesDelegation = event.action.mutability === 'delegate'
+      || delegationLifecycleUnproven || legacyDelegationProtocol;
     const action = {
       mutability: event.action.mutability,
       analysisReason: event.action.analysisReason,
@@ -251,7 +256,7 @@ function handleBeforeAction(event, options) {
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
       unboundedDelegation: Boolean(event.action.unboundedDelegation),
-      delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
+      delegationLifecycleUnproven
     };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     action.duplicateActionId = summary.duplicateActionId;
@@ -278,7 +283,7 @@ function handleBeforeAction(event, options) {
   const scope = childScope(event);
   const { state, result } = options.recoveryError
     ? evaluate(recoveryState(options.recoveryError))
-    : changesDelegation
+    : mayChangeDelegation
       ? updateSession(event.sessionId, options.dataDir, evaluate, scope || {})
       : evaluate(scope ? readState(event.sessionId, options.dataDir, scope) : readState(event.sessionId, options.dataDir));
 

@@ -226,6 +226,9 @@ function assertControlEvent(event) {
     if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
       throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
     }
+    if (event.action.delegationTargetId !== undefined) {
+      nonEmptyString(event.action.delegationTargetId, 'action.delegationTargetId');
+    }
   }
   if (event.kind === 'action.after') {
     if (!event.action || typeof event.action !== 'object') {
@@ -292,7 +295,7 @@ module.exports = {
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = __require("src/contracts.cjs");
 const { SHELL_ANALYSIS_REASONS, isShellAnalysisReason, assertControlEvent, supportsLifecycleFacts } = __require("src/control-protocol.cjs");
-const { inspectDelegation, applyDelegationFact } = __require("src/delegation-state.cjs");
+const { inspectDelegation, applyDelegationFact, isActiveAgent } = __require("src/delegation-state.cjs");
 const { decide } = __require("src/decision.cjs");
 const { readRuntime, recordDecision } = __require("src/runtime-audit.cjs");
 const { recordAnnotation } = __require("src/runtime-annotations.cjs");
@@ -523,12 +526,17 @@ function ensureChildState(event, options) {
 function handleBeforeAction(event, options) {
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
-  const changesDelegation = event.action.mutability === 'delegate'
+  const mayChangeDelegation = event.action.mutability === 'delegate'
     || event.action.delegationLifecycleUnproven || legacyDelegationProtocol;
   const delegationCount = event.action.mutability === 'delegate'
     ? (Number.isInteger(event.action.delegationCount) ? event.action.delegationCount : 1)
     : 0;
   const evaluate = (state) => {
+    const delegationLifecycleUnproven = Boolean(event.action.delegationLifecycleUnproven)
+      && !(event.action.delegationTargetId
+        && isActiveAgent(state.delegation, event.action.delegationTargetId));
+    const changesDelegation = event.action.mutability === 'delegate'
+      || delegationLifecycleUnproven || legacyDelegationProtocol;
     const action = {
       mutability: event.action.mutability,
       analysisReason: event.action.analysisReason,
@@ -541,7 +549,7 @@ function handleBeforeAction(event, options) {
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
       unboundedDelegation: Boolean(event.action.unboundedDelegation),
-      delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
+      delegationLifecycleUnproven
     };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     action.duplicateActionId = summary.duplicateActionId;
@@ -568,7 +576,7 @@ function handleBeforeAction(event, options) {
   const scope = childScope(event);
   const { state, result } = options.recoveryError
     ? evaluate(recoveryState(options.recoveryError))
-    : changesDelegation
+    : mayChangeDelegation
       ? updateSession(event.sessionId, options.dataDir, evaluate, scope || {})
       : evaluate(scope ? readState(event.sessionId, options.dataDir, scope) : readState(event.sessionId, options.dataDir));
 
@@ -991,6 +999,12 @@ function stoppedAgentIds(state) {
   return Array.isArray(state && state.stoppedAgentIds) ? state.stoppedAgentIds : [];
 }
 
+function isActiveAgent(state, agentId) {
+  if (typeof agentId !== 'string' || !agentId || stoppedAgentIds(state).includes(agentId)) return false;
+  return Object.values(reservationsOf(state)).some((reservation) =>
+    Array.isArray(reservation.agentIds) && reservation.agentIds.includes(agentId));
+}
+
 function acceptedActions(state) {
   return state && state.acceptedActions && typeof state.acceptedActions === 'object'
     ? state.acceptedActions
@@ -1227,6 +1241,7 @@ module.exports = {
   activeDelegationCount,
   bindSubagent,
   clearDelegations,
+  isActiveAgent,
   markReservationAsync,
   releaseReservation,
   releaseSubagent,
@@ -2916,7 +2931,7 @@ const { detectHashIntent } = __require("src/hash-intent.cjs");
 
 const WRITE_NAME = /(?:^|__|_)(?:add|append|apply|archive|close|commit|copy|create|delete|deploy|edit|install|merge|move|patch|post|publish|push|remove|rename|send|set|submit|update|upload|write)(?:$|__|_)/i;
 const READ_NAME = /(?:^|__|_)(?:cat|check|diff|fetch|find|get|inspect|list|load|open|read|review|search|show|status|view)(?:$|__|_)/i;
-const CONTROL_TOOLS = new Set(['update_plan', 'request_user_input', 'wait', 'wait_agent', 'interrupt_agent', 'close_agent']);
+const CONTROL_TOOLS = new Set(['send_input', 'update_plan', 'request_user_input', 'wait', 'wait_agent', 'interrupt_agent', 'close_agent']);
 // Match the host's known flattened namespaces exactly; do not strip arbitrary
 // prefixes from MCP or third-party tool names.
 const CODEX_TOOL_NAMES = new Map([

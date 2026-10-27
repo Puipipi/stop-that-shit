@@ -75,6 +75,9 @@ function assertControlEvent(event) {
     if (event.action.asyncLaunched !== undefined && typeof event.action.asyncLaunched !== 'boolean') {
       throw new TypeError('ControlEvent action.asyncLaunched must be a boolean when provided.');
     }
+    if (event.action.delegationTargetId !== undefined) {
+      nonEmptyString(event.action.delegationTargetId, 'action.delegationTargetId');
+    }
   }
   if (event.kind === 'action.after') {
     if (!event.action || typeof event.action !== 'object') {
