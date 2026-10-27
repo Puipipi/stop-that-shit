@@ -1598,10 +1598,12 @@ module.exports = {
     "eval:paired": "node scripts/run-paired-eval.cjs",
     "eval:routing": "node scripts/run-paired-eval.cjs --routing --runs 1",
     "eval:host-smoke": "node scripts/run-paired-eval.cjs --host-smoke --runs 1",
-    "release:check": "npm run schema:check && node scripts/release-check.cjs",
+    "release:check": "npm run schema:check && npm run codex:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs",
     "test:omp": "node --test test/omp-adapter.test.cjs test/omp-extension.test.cjs test/omp-package.test.cjs",
-    "test:hosts": "node scripts/test-hosts.cjs"
+    "test:hosts": "node scripts/test-hosts.cjs",
+    "codex:build": "node scripts/build-codex-plugin.cjs",
+    "codex:check": "node scripts/build-codex-plugin.cjs --check"
   },
   "engines": {
     "node": ">=18",
@@ -2989,10 +2991,12 @@ __modules["package.json"] = function(module) { module.exports = {
     "eval:paired": "node scripts/run-paired-eval.cjs",
     "eval:routing": "node scripts/run-paired-eval.cjs --routing --runs 1",
     "eval:host-smoke": "node scripts/run-paired-eval.cjs --host-smoke --runs 1",
-    "release:check": "npm run schema:check && node scripts/release-check.cjs",
+    "release:check": "npm run schema:check && npm run codex:check && node scripts/release-check.cjs",
     "release:build": "node scripts/build-release.cjs",
     "test:omp": "node --test test/omp-adapter.test.cjs test/omp-extension.test.cjs test/omp-package.test.cjs",
-    "test:hosts": "node scripts/test-hosts.cjs"
+    "test:hosts": "node scripts/test-hosts.cjs",
+    "codex:build": "node scripts/build-codex-plugin.cjs",
+    "codex:check": "node scripts/build-codex-plugin.cjs --check"
   },
   "engines": {
     "node": ">=18",

@@ -51,6 +51,10 @@ Add executable suites directly under `test/`, named `*.test.cjs` or
 fixture directories are not test entrypoints. Filter tests by name with
 `npm test -- --test-name-pattern=pattern`.
 
+After changing Codex plugin sources, run `npm run codex:build`, commit the
+generated `codex-plugin/` files, and run `npm run codex:check` to verify they
+match the sources.
+
 After changing the shared core, Hermes adapter, or package metadata, regenerate
 the Hermes bundle with `npm run hermes:build`. After changing the CaseBundle
 schema, regenerate its validator with `npm run schema:build`. Commit generated
