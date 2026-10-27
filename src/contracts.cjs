@@ -224,6 +224,7 @@ function narrowerScalar(parent, child, authority) {
   const childRank = authority.get(child);
   if (parentRank === undefined) return child;
   if (childRank === undefined) return parent;
+  if (childRank === parentRank) return parent;
   return childRank <= parentRank ? child : parent;
 }
 

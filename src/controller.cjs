@@ -177,10 +177,11 @@ function handlePrompt(event, state, parentContract = null) {
       message: `${state.directiveError.code}: ${state.directiveError.message}`
     };
   }
-  state.contract = parentContract ? narrowContract(parentContract, parsed.contract) : parsed.contract;
+  state.contract = parsed.contract;
   if (parsed.directive || parsed.correction) state.directiveError = null;
   if (parsed.directive || parsed.correction) state.directiveWarning = parsed.directive ? parsed.warning : null;
-  const promptContext = contractContext(state.contract, state.delegation, 'active', parsed.warning || state.directiveWarning, state.storageError);
+  const effectiveContract = parentContract ? narrowContract(parentContract, state.contract) : state.contract;
+  const promptContext = contractContext(effectiveContract, state.delegation, 'active', parsed.warning || state.directiveWarning, state.storageError);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
   if (parsed.warning) return { ...context(promptContext), warning: parsed.warning };
@@ -272,8 +273,12 @@ function handleBeforeAction(event, options, effectiveState = null) {
     ? evaluate(recoveryState(options.recoveryError))
     : mayChangeDelegation
       ? updateSession(event.sessionId, options.dataDir, (state) => {
-        if (scope && effectiveState) state.contract = effectiveState.contract;
-        return evaluate(state);
+        if (!scope || !effectiveState) return evaluate(state);
+        const childContract = state.contract;
+        state.contract = effectiveState.contract;
+        const outcome = evaluate(state);
+        state.contract = childContract;
+        return { ...outcome, state: { ...outcome.state, contract: effectiveState.contract } };
       }, scope || {})
       : evaluate(effectiveState || readState(event.sessionId, options.dataDir));
 

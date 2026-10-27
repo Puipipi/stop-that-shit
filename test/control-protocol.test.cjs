@@ -330,8 +330,11 @@ test('Codex subagent prompts create an independent inherited contract', (t) => {
   const childState = readState('parent-session', directory, { agentId: 'child-agent' });
   assert.equal(childState.contract.mode, 'answer');
   assert.equal(childState.contract.agentBudget, 0);
-  assert.deepEqual(childState.contract.allowedPaths, ['src/**']);
+  assert.equal(childState.contract.allowedPaths, null);
   assert.ok(fs.existsSync(childStatePath('parent-session', 'child-agent', directory)));
+  const status = handleCodexHook({ ...parent, agent_id: 'child-agent',
+    prompt: '$stop-that-shit status' }, { dataDir: directory });
+  assert.match(status.hookSpecificOutput.additionalContext, /files=src\/\*\*/);
 });
 
 test('a parent message can adjust a child contract without changing the parent', (t) => {
@@ -463,10 +466,10 @@ test('a child prompt cannot promote inherited parent authority', (t) => {
   }, { dataDir: directory });
 
   const child = readState(session_id, directory, { agentId: 'child-agent' });
-  assert.equal(child.contract.mode, 'review');
-  assert.equal(child.contract.hashPolicy, 'deny');
-  assert.equal(child.contract.dependencyPolicy, 'ask');
-  assert.deepEqual(child.contract.allowedPaths, ['src/**']);
+  assert.equal(child.contract.mode, 'change');
+  assert.equal(child.contract.hashPolicy, 'allow');
+  assert.equal(child.contract.dependencyPolicy, 'allow');
+  assert.equal(child.contract.allowedPaths, null);
   const denied = handleCodexHook({
     session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
     tool_name: 'apply_patch', tool_use_id: 'write-1',
@@ -530,6 +533,42 @@ test('a child without its own restriction follows a later parent relaxation', (t
     session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
     tool_name: 'apply_patch', tool_use_id: 'write-1',
     tool_input: { patch: '*** Begin Patch\n*** Update File: src/a.cjs\n@@\n-old\n+new\n*** End Patch' }
+  }, { dataDir: directory }), null);
+});
+
+test('a child prompt does not persist inherited restrictions before parent relaxation', (t) => {
+  const directory = dataDir(t);
+  const session_id = 'prompt-then-relax';
+  handleCodexHook({ session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock review files=src/** -- inspect' }, { dataDir: directory });
+  handleCodexHook({ session_id, agent_id: 'child-agent', hook_event_name: 'UserPromptSubmit',
+    prompt: 'Continue the assigned task.' }, { dataDir: directory });
+  assert.equal(readState(session_id, directory, { agentId: 'child-agent' }).contract.mode, 'unconfirmed');
+  handleCodexHook({ session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock change files=src/** -- work' }, { dataDir: directory });
+  assert.equal(handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'apply_patch', tool_use_id: 'write-1',
+    tool_input: { patch: '*** Begin Patch\n*** Update File: src/a.cjs\n@@\n-old\n+new\n*** End Patch' }
+  }, { dataDir: directory }), null);
+});
+
+test('a child delegation update does not persist inherited restrictions before parent relaxation', (t) => {
+  const directory = dataDir(t);
+  const session_id = 'delegate-then-relax';
+  handleCodexHook({ session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock review agents=0 -- inspect' }, { dataDir: directory });
+  const denied = handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'spawn_agent', tool_use_id: 'spawn-1', tool_input: { message: 'Inspect' }
+  }, { dataDir: directory });
+  assert.match(denied?.hookSpecificOutput?.permissionDecisionReason, /AGENT_BUDGET_EXHAUSTED/);
+  assert.equal(readState(session_id, directory, { agentId: 'child-agent' }).contract.mode, 'unconfirmed');
+  handleCodexHook({ session_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit lock change agents=1 -- work' }, { dataDir: directory });
+  assert.equal(handleCodexHook({
+    session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse',
+    tool_name: 'spawn_agent', tool_use_id: 'spawn-2', tool_input: { message: 'Inspect' }
   }, { dataDir: directory }), null);
 });
 

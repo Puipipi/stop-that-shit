@@ -72,6 +72,16 @@ test('a disabled parent contract stays disabled for children', () => {
   assert.equal(narrowContract(parent, child).level, 'off');
 });
 
+test('equal read-only modes keep the parent meaning', () => {
+  for (const parentMode of ['answer', 'review', 'monitor']) {
+    const parent = parseContractPrompt(`$stop-that-shit ${parentMode} -- parent`).contract;
+    for (const childMode of ['answer', 'review', 'monitor']) {
+      const child = parseContractPrompt(`$stop-that-shit ${childMode} -- child`).contract;
+      assert.equal(narrowContract(parent, child).mode, parentMode, `${parentMode} + ${childMode}`);
+    }
+  }
+});
+
 test('Codex namespaced directives match short directives and preserve field boundaries', () => {
   const previous = parseContractPrompt('$stop-that-shit review -- inspect').contract;
   for (const prefix of ['', '\n', '\r\n\r\n   ']) {
