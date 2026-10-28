@@ -6,7 +6,12 @@ const { inspectDelegation, applyDelegationFact } = require('./delegation-state.c
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
-const { readState, recoveryState, updateSession } = require('./state.cjs');
+const { readState, recoveryState, updateSession, dataRoot } = require('./state.cjs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+const approval = require('./action-approval.cjs');
+// Keep the executable helper in the hook's statically discoverable dependency graph.
+require('./dependency-runner.cjs');
 
 function none() {
   return { kind: 'none' };
@@ -156,16 +161,115 @@ function handlePrompt(event, state) {
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
   state.contract = parsed.contract;
+  const reply = approval.acceptReply(state.actionApproval, event.prompt);
+  if (state.contract.mode !== 'change' || state.contract.dependencyPolicy !== 'ask' || state.contract.level !== 'guard') {
+    state.actionApproval = null;
+    if (reply) reply.status = 'unavailable';
+  }
   if (parsed.directive || parsed.correction) state.directiveError = null;
   if (parsed.directive || parsed.correction) state.directiveWarning = parsed.directive ? parsed.warning : null;
   const promptContext = contractContext(state.contract, state.delegation, 'active', parsed.warning || state.directiveWarning, state.storageError);
   const repeatedContext = state.lastPromptContext === promptContext;
   state.lastPromptContext = promptContext;
+  if (reply) {
+    const acknowledgment = reply.status === 'approved'
+      ? `One-time approval is available for ${reply.eventId} in ${reply.targetCwd}. Retry the same operation; session deps=ask remains unchanged.`
+      : reply.status === 'denied'
+        ? `One-time approval for ${reply.eventId} was denied. No operation was authorized; session deps=ask remains unchanged.`
+        : 'No one-time approval was accepted: the question is unavailable, expired or does not match. The dependency policy is unchanged.';
+    return context(`${promptContext}\n${acknowledgment}`);
+  }
   if (parsed.warning) return { ...context(promptContext), warning: parsed.warning };
   return repeatedContext ? none() : context(promptContext);
 }
 
+function handleApprovalAction(event, options) {
+  try {
+    return updateSession(event.sessionId, options.dataDir, state => {
+    if (state.storageError) return { kind: 'deny', message: state.storageError.message };
+    const summary = inspectDelegation(state.delegation, { id: event.action.id });
+    const action = { ...event.action, duplicateActionId: summary.duplicateActionId };
+    let result = decide({ contract: state.contract, action, delegation: summary, state });
+    let usedApproval = null;
+    let rewrittenCommand = null;
+    const record = state.actionApproval;
+    if (result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
+        && state.contract.mode === 'change' && state.contract.level === 'guard' && approval.live(record)
+        && ['approved', 'issued'].includes(record.status) && event.action.id !== record.deniedActionId
+        && approval.digest(event) === record.digest) {
+      const remaining = decide({ contract: state.contract, action: { ...action, dependencyIntent: false }, delegation: summary, state });
+      if (remaining.outcome === 'allow') {
+        const ticket = record.status === 'issued' ? record.ticket : crypto.randomBytes(32).toString('hex');
+        const launcher = path.join(__dirname, 'dependency-runner.cjs');
+        const encode = value => Buffer.from(value, 'utf8').toString('base64');
+        const bootstrap = "require(Buffer.from(process.argv[1],'base64').toString('utf8')).run(Buffer.from(process.argv[2],'base64').toString('utf8'),Buffer.from(process.argv[3],'base64').toString('utf8'),process.argv[4])";
+        rewrittenCommand = `node -e "${bootstrap}" ${encode(launcher)} ${encode(event.sessionId)} ${encode(dataRoot(options.dataDir))} ${ticket}`;
+        record.status = 'issued';
+        record.approvedAction = {
+          mutability: action.mutability,
+          analysisReason: action.analysisReason,
+          hashIntent: Boolean(action.hashIntent),
+          reachability: action.reachability,
+          authorization: action.authorization,
+          affectedPaths: action.affectedPaths,
+          cwd: record.targetCwd,
+          unboundedDelegation: Boolean(action.unboundedDelegation),
+          delegationLifecycleUnproven: Boolean(action.delegationLifecycleUnproven)
+        };
+        record.issuedActionId = event.action.id;
+        record.ticket = ticket;
+        usedApproval = { eventId: record.eventId, questionCallId: record.questionCallId, consumed: false };
+        result = remaining;
+      }
+    }
+    if (result.outcome === 'allow' && event.action.name === 'request_user_input_async'
+        && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })
+        && !approval.registerQuestion(record, event.action)) {
+      result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
+        explanation: 'The approval question is expired, already registered, or does not match the pending operation and an existing absolute directory.',
+        nextStep: 'Request a fresh approval for the specific operation; do not display an unbound card.' };
+    }
+    const denied = ['deny_and_explain', 'require_user_approval'].includes(result.outcome);
+    const responseOutcome = denied ? options.denialResponseOutcome || 'permission_deny_returned'
+      : result.outcome === 'report_and_defer' ? 'context_returned' : 'none';
+    const auditEvent = recordDecision({ sessionId: event.sessionId, action: event.action, contract: state.contract,
+      delegation: state.delegation, decision: result, responseOutcome, approval: usedApproval }, options);
+    let message;
+    if (denied && result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
+        && state.contract.mode === 'change' && state.contract.level === 'guard') {
+      let pending = null;
+      if (!approval.live(record) || record.status === 'consumed') {
+        pending = approval.newPending(event, auditEvent && auditEvent.eventId);
+        if (pending) { state.actionApproval = pending; state.expiredApprovalEventId = null; }
+      } else if (record.status === 'pending' && approval.digest(event) === record.digest) {
+        pending = record;
+      }
+      const nextStep = pending
+        ? 'Submit the exact approval card below with the target directory. After an affirmative reply, retry this operation; the session remains deps=ask.'
+        : approval.live(record) && record.status !== 'consumed'
+          ? 'An approval is already bound to another action or is awaiting execution. Use the matching operation; the session remains deps=ask.'
+          : 'A single direct static dependency command or supported PowerShell wrapper can be proposed as a controlled child and still requires a card. For diagnostic text use a supported literal write or file edit; do not execute an install.';
+      message = decisionMessage({ ...result, nextStep }, state.contract, auditEvent, responseOutcome, event.action.analysisReason);
+      if (pending) message += `\nApproval question: ${pending.questionPrefix}<absolute canonical directory>?\nApproval options: ${approval.YES} | ${approval.NO}`;
+      else if (!approval.live(record) || record.status === 'consumed') message += '\nOne-time approval is unavailable for this operation or no safe package manager entry was found.';
+    } else {
+      message = decisionMessage(result, state.contract, auditEvent, responseOutcome, event.action.analysisReason);
+    }
+    if (denied) return { kind: 'deny', decision: result, eventId: auditEvent && auditEvent.eventId, message };
+    if (rewrittenCommand) return { kind: 'rewrite', command: rewrittenCommand };
+    return responseOutcome === 'context_returned' ? context(message) : none();
+    });
+  } catch {
+    // A failed ledger lock or write cannot turn a guarded action into a fail-open call.
+    return { kind: 'deny', message: 'Stop That Shit: approval state unavailable; action denied.' };
+  }
+}
+
 function handleBeforeAction(event, options) {
+  if (!options.recoveryError && event.host?.family === 'codex'
+      && (event.action.name === 'request_user_input_async' || event.action.dependencyIntent)) {
+    return handleApprovalAction(event, options);
+  }
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
   const changesDelegation = event.action.mutability === 'delegate'

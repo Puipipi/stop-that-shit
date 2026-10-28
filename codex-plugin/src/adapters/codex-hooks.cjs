@@ -120,6 +120,9 @@ function fromControlResult(hookEventName, result) {
     if (result.warning) output.systemMessage = result.warning.message;
     return output;
   }
+  if (result.kind === 'rewrite') {
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: { command: result.command } } };
+  }
   if (result.kind === 'deny') {
     return {
       hookSpecificOutput: {
