@@ -2644,14 +2644,17 @@ function analyzeShell(command) {
     hashIntent: HASH_COMMAND.test(text), dependencyIntent: DEPENDENCY_COMMAND.test(text)
   };
   const commands = analysis.commands.map(command => ({
-    ...classifyStaticCommand(command), text: command.args.join(' ')
+    ...classifyStaticCommand(command), text: command.args.join(' '),
+    // Static PowerShell content cmdlets receive their literal arguments as data.
+    // Dynamic syntax is rejected by staticShellCommands before this point.
+    literalContent: ['set-content', 'add-content'].includes(String(command.args[0] || '').toLowerCase())
   }));
   // Proven reads treat their arguments as data. Keep the existing intent checks
   // for writes and unproven programs, independently for each command in a chain.
   return {
     ...combineClassifications(commands),
-    hashIntent: commands.some(command => command.mutability !== 'read' && HASH_COMMAND.test(command.text)),
-    dependencyIntent: commands.some(command => command.mutability !== 'read' && DEPENDENCY_COMMAND.test(command.text))
+    hashIntent: commands.some(command => command.mutability !== 'read' && !command.literalContent && HASH_COMMAND.test(command.text)),
+    dependencyIntent: commands.some(command => command.mutability !== 'read' && !command.literalContent && DEPENDENCY_COMMAND.test(command.text))
   };
 }
 
