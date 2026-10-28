@@ -1,7 +1,8 @@
 'use strict';
 
 const { PROTOCOL_VERSION } = require('../control-protocol.cjs');
-const { handleControlEvent } = require('../controller.cjs');
+const { handleControlEvent, contractContext } = require('../controller.cjs');
+const { readState } = require('../state.cjs');
 const { analyzeCodexTool, canonicalCodexToolName } = require('./codex-tool-classifier.cjs');
 const { optionalIdentifier } = require('./lifecycle-fields.cjs');
 
@@ -135,6 +136,10 @@ function fromControlResult(hookEventName, result) {
 function handleCodexHook(input, options = {}) {
   const event = toControlEvent(input);
   if (!event) return null;
+  if (event.kind === 'prompt.submit' && optionalIdentifier(input.agent_id)) {
+    const state = readState(event.sessionId, options.dataDir);
+    return contextOutput(input.hook_event_name, `Child prompt does not modify the parent contract. ${contractContext(state.contract, state.delegation, 'active', state.directiveWarning, state.storageError)}`);
+  }
   const result = handleControlEvent(event, options);
   return fromControlResult(input.hook_event_name, result);
 }
