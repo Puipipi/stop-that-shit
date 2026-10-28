@@ -1,6 +1,21 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {handleHook}=require('../src/hook-policy.cjs');
+
+// Approval tests must not depend on package managers installed on the host.
+// The entries are fingerprinted but never executed by this suite.
+const managerFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-approval-managers-'));
+const previousPath = process.env.PATH;
+for (const [manager, entry] of [['pnpm', 'pnpm.cjs'], ['npm', 'npm-cli.js']]) {
+  const bin = path.join(managerFixture, 'node_modules', manager, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, entry), '// test-only manager fixture\n');
+}
+process.env.PATH = [managerFixture, previousPath || ''].join(path.delimiter);
+test.after(() => {
+  process.env.PATH = previousPath;
+  fs.rmSync(managerFixture, { recursive: true, force: true });
+});
 test('explicit card authorizes only the exact denied dependency action once',t=>{
  const dataDir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-action-'));t.after(()=>fs.rmSync(dataDir,{recursive:true,force:true}));const options={dataDir};const base={session_id:'approval-test',turn_id:'t',cwd:process.cwd()};
  const prompt=prompt=>handleHook({...base,hook_event_name:'UserPromptSubmit',prompt},options);
