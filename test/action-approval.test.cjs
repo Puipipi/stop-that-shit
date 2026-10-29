@@ -261,3 +261,32 @@ test('native reply arrays authorize the unique matching question and reject dupl
   assert.match(rejected.hookSpecificOutput.additionalContext, /No one-time approval was accepted/);
   assert.match(pre('retry', 'Bash', input).hookSpecificOutput.permissionDecisionReason, /DEPENDENCY_NOT_AUTHORIZED/);
 });
+
+test('approved retry is denied with a clear reason when the system launcher is unavailable', { skip: process.platform !== 'win32' }, t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-launcher-unavailable-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const options = { dataDir: dir };
+  const base = { session_id: 'launcher-unavailable', turn_id: 't', cwd: process.cwd() };
+  const prompt = text => handleHook({ ...base, hook_event_name: 'UserPromptSubmit', prompt: text }, options);
+  const pre = (id, tool_name, tool_input) => handleHook({ ...base, hook_event_name: 'PreToolUse', tool_name, tool_use_id: id, tool_input }, options);
+  const input = { command: 'pnpm install --offline --frozen-lockfile --ignore-scripts' };
+  prompt('$stop-that-shit change deps=ask -- task');
+  const denied = pre('original', 'Bash', input);
+  const match = /Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denied.hookSpecificOutput.permissionDecisionReason);
+  assert.ok(match);
+  const question = match[1].replace('<absolute canonical directory>', fs.realpathSync(process.cwd()));
+  assert.equal(pre('question', 'request_user_input_async', { questions: [{ title: question, options: [match[2], match[3]] }] }), null);
+  prompt(`<send_user_message_question_reply>\n${JSON.stringify([{ questionItemId: JSON.stringify(['request_user_input_async', 'question', 0]), question, answer: match[2] }])}\n</send_user_message_question_reply>`);
+
+  const previousRoot = process.env.SystemRoot;
+  process.env.SystemRoot = path.join(dir, 'missing system root');
+  let result;
+  try { result = pre('retry', 'Bash', input); }
+  finally {
+    if (previousRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = previousRoot;
+  }
+  assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(result.hookSpecificOutput.permissionDecisionReason, /APPROVED_LAUNCHER_UNAVAILABLE/);
+  assert.match(result.hookSpecificOutput.permissionDecisionReason, /SystemRoot/);
+});

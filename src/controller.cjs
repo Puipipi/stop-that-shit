@@ -10,6 +10,7 @@ const { readState, recoveryState, updateSession, dataRoot } = require('./state.c
 const path = require('node:path');
 const crypto = require('node:crypto');
 const approval = require('./action-approval.cjs');
+const { buildRunnerCommand } = require('./runner-command.cjs');
 // Keep the executable helper in the hook's statically discoverable dependency graph.
 require('./dependency-runner.cjs');
 
@@ -200,26 +201,37 @@ function handleApprovalAction(event, options) {
       const remaining = decide({ contract: state.contract, action: { ...action, dependencyIntent: false }, delegation: summary, state });
       if (remaining.outcome === 'allow') {
         const ticket = record.status === 'issued' ? record.ticket : crypto.randomBytes(32).toString('hex');
-        const launcher = path.join(__dirname, 'dependency-runner.cjs');
-        const encode = value => Buffer.from(value, 'utf8').toString('base64');
-        const bootstrap = "require(Buffer.from(process.argv[1],'base64').toString('utf8')).run(Buffer.from(process.argv[2],'base64').toString('utf8'),Buffer.from(process.argv[3],'base64').toString('utf8'),process.argv[4])";
-        rewrittenCommand = `node -e "${bootstrap}" ${encode(launcher)} ${encode(event.sessionId)} ${encode(dataRoot(options.dataDir))} ${ticket}`;
-        record.status = 'issued';
-        record.approvedAction = {
-          mutability: action.mutability,
-          analysisReason: action.analysisReason,
-          hashIntent: Boolean(action.hashIntent),
-          reachability: action.reachability,
-          authorization: action.authorization,
-          affectedPaths: action.affectedPaths,
-          cwd: record.targetCwd,
-          unboundedDelegation: Boolean(action.unboundedDelegation),
-          delegationLifecycleUnproven: Boolean(action.delegationLifecycleUnproven)
-        };
-        record.issuedActionId = event.action.id;
-        record.ticket = ticket;
-        usedApproval = { eventId: record.eventId, questionCallId: record.questionCallId, consumed: false };
-        result = remaining;
+        try {
+          rewrittenCommand = buildRunnerCommand({
+            executable: process.execPath,
+            runnerPath: path.join(__dirname, 'dependency-runner.cjs'),
+            sessionId: event.sessionId,
+            dataDir: dataRoot(options.dataDir),
+            ticket
+          });
+          record.status = 'issued';
+          record.approvedAction = {
+            mutability: action.mutability,
+            analysisReason: action.analysisReason,
+            hashIntent: Boolean(action.hashIntent),
+            reachability: action.reachability,
+            authorization: action.authorization,
+            affectedPaths: action.affectedPaths,
+            cwd: record.targetCwd,
+            unboundedDelegation: Boolean(action.unboundedDelegation),
+            delegationLifecycleUnproven: Boolean(action.delegationLifecycleUnproven)
+          };
+          record.issuedActionId = event.action.id;
+          record.ticket = ticket;
+          usedApproval = { eventId: record.eventId, questionCallId: record.questionCallId, consumed: false };
+          result = remaining;
+        } catch (error) {
+          result = {
+            outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVED_LAUNCHER_UNAVAILABLE',
+            explanation: error.message,
+            nextStep: 'The one-time approval remains unused. Retry after restoring a verifiable system PowerShell launcher path.'
+          };
+        }
       }
     }
     if (result.outcome === 'allow' && event.action.name === 'request_user_input_async'
