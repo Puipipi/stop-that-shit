@@ -4,7 +4,7 @@ const { PROTOCOL_VERSION } = require('../control-protocol.cjs');
 const { handleControlEvent } = require('../controller.cjs');
 const { analyzeCodexTool, canonicalCodexToolName } = require('./codex-tool-classifier.cjs');
 const { optionalIdentifier } = require('./lifecycle-fields.cjs');
-const { YES, NO } = require('../action-approval.cjs');
+const { YES, NO, syncQuestionDigest } = require('../action-approval.cjs');
 
 const EVENT_KIND = {
   SessionStart: 'session.start',
@@ -57,8 +57,9 @@ function toControlEvent(input) {
       const questions = input.tool_input?.questions;
       if (!response || Object.keys(response).length !== 1 || !Object.hasOwn(response, 'answers')
           || !response.answers || typeof response.answers !== 'object' || Array.isArray(response.answers)
-          || !Array.isArray(questions) || questions.length !== 1
-          || typeof questions[0]?.id !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(questions[0].id)) return null;
+          || !Array.isArray(questions) || questions.length !== 1) return null;
+      const questionDigest = syncQuestionDigest(questions[0]);
+      if (!questionDigest) return null;
       const questionId = questions[0].id;
       const answers = response.answers;
       if (Object.keys(answers).length !== 1 || !Object.hasOwn(answers, questionId)) return null;
@@ -67,7 +68,7 @@ function toControlEvent(input) {
           || Object.keys(answer).length !== 1 || !Object.hasOwn(answer, 'answers')
           || !Array.isArray(answer.answers) || answer.answers.length !== 1
           || ![YES, NO].includes(answer.answers[0])) return null;
-      event.action = { id: actionId, name: toolName, questionId, answer: answer.answers[0], cwd: input.cwd };
+      event.action = { id: actionId, name: toolName, questionId, questionDigest, answer: answer.answers[0], cwd: input.cwd };
       return event;
     }
     if (!['spawn_agent', 'Agent', 'wait_agent'].includes(toolName)) return null;

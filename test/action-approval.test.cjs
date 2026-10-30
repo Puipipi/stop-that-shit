@@ -165,6 +165,17 @@ test('only the exact synchronous tool result can approve or deny the registered 
  after('native-call',question,{answers:{'sync-question':{answers:[match[2]]}}},{cwd:os.tmpdir()});
  assert.equal(state().status,'question');
  assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'wrong cwd does not write the session ledger');
+ const unrelatedQuestion={...question,question:'Can you handle an unrelated request?'};
+ expectedMtime=ageStateFile();
+ assert.equal(before('native-call','request_user_input',{questions:[unrelatedQuestion]}),null,'same toolUseId can run an ordinary question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'ordinary reused toolUseId does not change the pending proposal');
+ after('native-call',unrelatedQuestion,{answers:{'sync-question':{answers:[match[2]]}}});
+ assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'answer to a different question does not write the session ledger');
+ const changedDescription={...question,options:question.options.map((option,index)=>index===0?{...option,description:'Changed operation description.'}:option)};
+ after('native-call',changedDescription,{answers:{'sync-question':{answers:[match[2]]}}});
+ assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'changed option description does not write the session ledger');
  after('native-call',question,JSON.stringify({answers:{'sync-question':{answers:[match[2]]}}}));
  assert.equal(state().status,'approved');
  assert.equal(before('retry','Bash',input).hookSpecificOutput.permissionDecision,'allow');

@@ -2374,6 +2374,7 @@ function live(record, now = Date.now()) {
     && (record.questionToolName === undefined || ['request_user_input_async', 'request_user_input'].includes(record.questionToolName))
     && (record.questionToolName !== 'request_user_input' || typeof record.syncQuestionId === 'string'
       && /^[A-Za-z0-9_-]{1,256}$/.test(record.syncQuestionId)
+      && /^[a-f0-9]{64}$/.test(record.syncQuestionDigest || '')
       && typeof record.syncRegistrationCwd === 'string' && path.isAbsolute(record.syncRegistrationCwd))
     && Number.isSafeInteger(record.proposalExpires) && Number.isSafeInteger(record.expires)
     && (['pending', 'question'].includes(record.status) ? record.proposalExpires : record.expires) > now
@@ -2397,6 +2398,25 @@ function isSyncOptions(options) {
       && option.description === (index === 0 ? YES_DESCRIPTION : NO_DESCRIPTION));
 }
 
+function isSyncQuestion(question) {
+  return question && typeof question === 'object' && !Array.isArray(question)
+    && typeof question.id === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(question.id)
+    && question.header === SYNC_HEADER && typeof question.question === 'string'
+    && Buffer.byteLength(question.question, 'utf8') <= 8192 && isSyncOptions(question.options)
+    && Object.keys(question).sort().join(',') === 'header,id,options,question';
+}
+
+function syncQuestionDigest(question) {
+  if (!isSyncQuestion(question)) return null;
+  const canonical = {
+    id: question.id,
+    header: question.header,
+    question: question.question,
+    options: question.options.map(option => ({ label: option.label, description: option.description }))
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
 function registerQuestion(record, action) {
   if (!live(record) || record.status !== 'pending' || !action.id
       || !/^[A-Za-z0-9_-]{1,256}$/.test(action.id)
@@ -2411,10 +2431,7 @@ function registerQuestion(record, action) {
         || Object.keys(question).some(key => !['title', 'options'].includes(key))) return false;
     text = question.title;
   } else {
-    if (typeof question?.id !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(question.id)
-        || question.header !== SYNC_HEADER || typeof question.question !== 'string'
-        || !isSyncOptions(question.options)
-        || Object.keys(question).sort().join(',') !== 'header,id,options,question') return false;
+    if (!isSyncQuestion(question)) return false;
     text = question.question;
   }
   if (!text.startsWith(record.questionPrefix) || !text.endsWith('?')) return false;
@@ -2442,6 +2459,7 @@ function registerQuestion(record, action) {
     : JSON.stringify(['request_user_input', action.id, question.id]);
   if (action.name === 'request_user_input') {
     record.syncQuestionId = question.id;
+    record.syncQuestionDigest = syncQuestionDigest(question);
     record.syncRegistrationCwd = registrationCwd;
   }
   record.status = 'question';
@@ -2495,6 +2513,7 @@ function nativeAnswerMatches(record, action, now = Date.now()) {
   if (!live(record, now) || record.status !== 'question'
       || record.questionToolName !== 'request_user_input' || action?.name !== 'request_user_input'
       || action.id !== record.questionCallId || action.questionId !== record.syncQuestionId
+      || action.questionDigest !== record.syncQuestionDigest
       || ![YES, NO].includes(action.answer)
       || typeof action.cwd !== 'string' || !path.isAbsolute(action.cwd)) return false;
   let cwd;
@@ -2513,7 +2532,7 @@ function acceptNativeAnswer(record, action, now = Date.now()) {
   return { status: 'denied', eventId: record.eventId };
 }
 
-module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
 
 },
 "src/shell-analysis.cjs": function(module, exports, __require) {

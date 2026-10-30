@@ -777,7 +777,10 @@ test('Codex wait releases only explicit UUID targets with proven terminal result
 
 test('Codex native approval result normalizer keeps only a selected exact option', () => {
   const { toControlEvent } = require('../src/adapters/codex-hooks.cjs');
-  const question = { id: 'approval-1', header: 'Approval', question: 'Allow this operation once?', options: [] };
+  const question = { id: 'approval-1', header: 'Approval', question: 'Allow this operation once?', options: [
+    { label: 'Allow this operation once', description: 'Authorize this operation once.' },
+    { label: 'Deny this operation', description: 'Do not authorize this operation.' }
+  ] };
   const base = { session_id: 'parent', cwd: process.cwd(), hook_event_name: 'PostToolUse', tool_name: 'request_user_input',
     tool_use_id: 'native-call-1', tool_input: { questions: [question] } };
   const selected = { answers: { 'approval-1': { answers: ['Allow this operation once'] } } };
@@ -787,6 +790,8 @@ test('Codex native approval result normalizer keeps only a selected exact option
     assert.equal(event.action.name, 'request_user_input');
     assert.equal(event.action.questionId, 'approval-1');
     assert.equal(event.action.answer, 'Allow this operation once');
+    assert.match(event.action.questionDigest,/^[a-f0-9]{64}$/);
+    assert.equal(Object.hasOwn(event.action, 'question'), false);
     assert.equal(Object.hasOwn(event.action, 'tool_response'), false);
   }
   for (const tool_response of [
