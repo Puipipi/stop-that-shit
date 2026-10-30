@@ -558,8 +558,16 @@ function handleApprovalAction(event, options) {
 
 function handleBeforeAction(event, options) {
   if (!options.recoveryError && event.host?.family === 'codex'
-      && (['request_user_input_async', 'request_user_input'].includes(event.action.name) || event.action.dependencyIntent)) {
+      && (event.action.name === 'request_user_input_async' || event.action.dependencyIntent)) {
     return handleApprovalAction(event, options);
+  }
+  if (!options.recoveryError && event.host?.family === 'codex' && event.action.name === 'request_user_input') {
+    let snapshot = null;
+    try { snapshot = readState(event.sessionId, options.dataDir); } catch {}
+    const record = snapshot && (snapshot.actionApproval || { eventId: snapshot.expiredApprovalEventId });
+    if (approval.isProposalQuestion(event.action, record) || approval.isProposalQuestion(event.action, null)) {
+      return handleApprovalAction(event, options);
+    }
   }
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
     && ['delegate', 'control', 'unknown'].includes(event.action.mutability);
@@ -634,8 +642,11 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
-  if (event.host?.family === 'codex' && event.action?.name === 'request_user_input') {
+  if (event.action?.name === 'request_user_input') {
+    if (event.host?.family !== 'codex') return none();
     try {
+      const snapshot = readState(event.sessionId, options.dataDir);
+      if (snapshot.storageError || !approval.nativeAnswerMatches(snapshot.actionApproval, event.action)) return none();
       return updateSession(event.sessionId, options.dataDir, state => {
         if (!state.storageError) approval.acceptNativeAnswer(state.actionApproval, event.action);
         return none();
@@ -2415,6 +2426,7 @@ function registerQuestion(record, action) {
     actual = fs.realpathSync(requested);
     if (!fs.statSync(actual).isDirectory()) return false;
     if (action.name === 'request_user_input') {
+      if (typeof action.cwd !== 'string' || !path.isAbsolute(action.cwd)) return false;
       registrationCwd = fs.realpathSync(action.cwd);
       if (!fs.statSync(registrationCwd).isDirectory()) return false;
     }
@@ -2479,13 +2491,19 @@ function acceptReply(record, text, now = Date.now()) {
   return { status: 'mismatch' };
 }
 
-function acceptNativeAnswer(record, action, now = Date.now()) {
-  let cwd;
-  try { cwd = fs.realpathSync(action?.cwd); } catch { return null; }
+function nativeAnswerMatches(record, action, now = Date.now()) {
   if (!live(record, now) || record.status !== 'question'
       || record.questionToolName !== 'request_user_input' || action?.name !== 'request_user_input'
       || action.id !== record.questionCallId || action.questionId !== record.syncQuestionId
-      || cwd !== record.syncRegistrationCwd || !['Allow this operation once', 'Deny this operation'].includes(action.answer)) return null;
+      || ![YES, NO].includes(action.answer)
+      || typeof action.cwd !== 'string' || !path.isAbsolute(action.cwd)) return false;
+  let cwd;
+  try { cwd = fs.realpathSync(action?.cwd); } catch { return false; }
+  return cwd === record.syncRegistrationCwd;
+}
+
+function acceptNativeAnswer(record, action, now = Date.now()) {
+  if (!nativeAnswerMatches(record, action, now)) return null;
   if (action.answer === YES) {
     record.status = 'approved';
     record.expires = now + PERMIT_TTL_MS;
@@ -2495,7 +2513,7 @@ function acceptNativeAnswer(record, action, now = Date.now()) {
   return { status: 'denied', eventId: record.eventId };
 }
 
-module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, acceptNativeAnswer, hostQuestionText };
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
 
 },
 "src/shell-analysis.cjs": function(module, exports, __require) {

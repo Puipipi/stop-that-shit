@@ -90,6 +90,29 @@ test('synchronous native question registration is exact and does not accept prom
  assert.equal(before('sync-call-duplicate','request_user_input',{questions:[nativeQuestion]}).hookSpecificOutput.permissionDecision,'deny');
 });
 
+test('ordinary synchronous questions do not write or wait on the session ledger', t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-sync-ordinary-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const session='sync-ordinary',base={session_id:session,turn_id:'t',cwd:process.cwd()},opt={dataDir:dir};
+ const {statePath}=require('../src/state.cjs');
+ handleHook({...base,hook_event_name:'UserPromptSubmit',prompt:'$stop-that-shit change deps=ask -- work'},opt);
+ const stateFile=statePath(session,dir),lockDirectory=`${stateFile}.lock`;
+ const oldTime=new Date(Date.now()-120000);
+ fs.utimesSync(stateFile,oldTime,oldTime);
+ const expectedMtime=fs.statSync(stateFile).mtimeMs;
+ fs.mkdirSync(lockDirectory);
+ fs.writeFileSync(path.join(lockDirectory,`${process.pid}-00000000-0000-4000-8000-000000000000`),'');
+ t.after(()=>fs.rmSync(lockDirectory,{recursive:true,force:true}));
+ const question={id:'ordinary-question',header:'Question',question:'Which option should I use?',options:[
+  {label:'Allow this operation once',description:'Select the first answer.'},
+  {label:'Deny this operation',description:'Select the second answer.'}
+ ]};
+ assert.equal(handleHook({...base,hook_event_name:'PreToolUse',tool_name:'request_user_input',tool_use_id:'ordinary-call',tool_input:{questions:[question]}},opt),null);
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'ordinary PreToolUse leaves the session file untouched');
+ assert.equal(handleHook({...base,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:'ordinary-call',tool_input:{questions:[question]},
+  tool_response:{answers:{'ordinary-question':{answers:['Allow this operation once']}}}},opt),null);
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'ordinary PostToolUse leaves the session file untouched');
+});
+
 test('only the exact synchronous tool result can approve or deny the registered proposal', t => {
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-sync-answer-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const opt={dataDir:dir},base={session_id:'sync-answer',turn_id:'t',cwd:process.cwd()};
@@ -104,8 +127,10 @@ test('only the exact synchronous tool result can approve or deny the registered 
   question:match[1].replace('<absolute canonical directory>',fs.realpathSync(base.cwd)),
   options:[{label:match[2],description:'Authorize this operation once.'},{label:match[3],description:'Do not authorize this operation.'}]};
  assert.equal(before('native-call','request_user_input',{questions:[question]}),null);
- const {readState}=require('../src/state.cjs');
+ const {readState,writeState,statePath}=require('../src/state.cjs');
  const state=()=>readState(base.session_id,dir).actionApproval;
+ const stateFile=statePath(base.session_id,dir);
+ function ageStateFile(){const oldTime=new Date(Date.now()-120000);fs.utimesSync(stateFile,oldTime,oldTime);return fs.statSync(stateFile).mtimeMs;}
  for (const result of [
   {answers:{}},
   {answers:{other:{answers:[match[2]]}}},
@@ -118,24 +143,49 @@ test('only the exact synchronous tool result can approve or deny the registered 
   after('native-call',question,result);
   assert.equal(state().status,'question');
  }
+ let expectedMtime=ageStateFile();
+ after('wrong-tool-call',question,{answers:{'sync-question':{answers:[match[2]]}}});
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'wrong toolUseId does not write the session ledger');
  const mismatchedQuestion={...question,id:'other-question'};
+ expectedMtime=ageStateFile();
  after('native-call',mismatchedQuestion,{answers:{'other-question':{answers:[match[2]]}}});
  assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'wrong questionId does not write the session ledger');
  const {toControlEvent}=require('../src/adapters/codex-hooks.cjs');
  const {handleControlEvent}=require('../src/controller.cjs');
  const codexPost=toControlEvent({...base,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:'native-call',
   tool_input:{questions:[question]},tool_response:{answers:{'sync-question':{answers:[match[2]]}}}});
+ expectedMtime=ageStateFile();
  for (const event of [{...codexPost,host:{family:'claude'}},{...codexPost,host:undefined}]) {
   handleControlEvent(event,opt);
   assert.equal(state().status,'question');
+  assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'unsupported host result does not write the session ledger');
  }
- after('wrong-tool-call',question,{answers:{'sync-question':{answers:[match[2]]}}});
- assert.equal(state().status,'question');
+ expectedMtime=ageStateFile();
  after('native-call',question,{answers:{'sync-question':{answers:[match[2]]}}},{cwd:os.tmpdir()});
  assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'wrong cwd does not write the session ledger');
  after('native-call',question,JSON.stringify({answers:{'sync-question':{answers:[match[2]]}}}));
  assert.equal(state().status,'approved');
  assert.equal(before('retry','Bash',input).hookSpecificOutput.permissionDecision,'allow');
+
+ base.session_id='sync-expired-answer';
+ prompt('$stop-that-shit change deps=ask -- work');
+ const expiredDenial=before('install','Bash',input);
+ const expiredMatch=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(expiredDenial.hookSpecificOutput.permissionDecisionReason);
+ const expiredQuestion={...question,id:'expired-question',question:expiredMatch[1].replace('<absolute canonical directory>',fs.realpathSync(base.cwd)),options:[
+  {label:expiredMatch[2],description:'Authorize this operation once.'},{label:expiredMatch[3],description:'Do not authorize this operation.'}
+ ]};
+ before('expired-native-call','request_user_input',{questions:[expiredQuestion]});
+ const expiredState=readState(base.session_id,dir);
+ expiredState.actionApproval.proposalExpires=Date.now()-1;
+ writeState(base.session_id,expiredState,dir);
+ const expiredFile=statePath(base.session_id,dir),oldTime=new Date(Date.now()-120000);
+ fs.utimesSync(expiredFile,oldTime,oldTime);
+ const expiredMtime=fs.statSync(expiredFile).mtimeMs;
+ after('expired-native-call',expiredQuestion,{answers:{'expired-question':{answers:[expiredMatch[2]]}}});
+ assert.equal(fs.statSync(expiredFile).mtimeMs,expiredMtime,'expired answer does not write the session ledger');
+ assert.equal(state(),null);
 
  base.session_id='sync-deny-answer';
  prompt('$stop-that-shit change deps=ask -- work');

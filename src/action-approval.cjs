@@ -115,6 +115,7 @@ function registerQuestion(record, action) {
     actual = fs.realpathSync(requested);
     if (!fs.statSync(actual).isDirectory()) return false;
     if (action.name === 'request_user_input') {
+      if (typeof action.cwd !== 'string' || !path.isAbsolute(action.cwd)) return false;
       registrationCwd = fs.realpathSync(action.cwd);
       if (!fs.statSync(registrationCwd).isDirectory()) return false;
     }
@@ -179,13 +180,19 @@ function acceptReply(record, text, now = Date.now()) {
   return { status: 'mismatch' };
 }
 
-function acceptNativeAnswer(record, action, now = Date.now()) {
-  let cwd;
-  try { cwd = fs.realpathSync(action?.cwd); } catch { return null; }
+function nativeAnswerMatches(record, action, now = Date.now()) {
   if (!live(record, now) || record.status !== 'question'
       || record.questionToolName !== 'request_user_input' || action?.name !== 'request_user_input'
       || action.id !== record.questionCallId || action.questionId !== record.syncQuestionId
-      || cwd !== record.syncRegistrationCwd || !['Allow this operation once', 'Deny this operation'].includes(action.answer)) return null;
+      || ![YES, NO].includes(action.answer)
+      || typeof action.cwd !== 'string' || !path.isAbsolute(action.cwd)) return false;
+  let cwd;
+  try { cwd = fs.realpathSync(action?.cwd); } catch { return false; }
+  return cwd === record.syncRegistrationCwd;
+}
+
+function acceptNativeAnswer(record, action, now = Date.now()) {
+  if (!nativeAnswerMatches(record, action, now)) return null;
   if (action.answer === YES) {
     record.status = 'approved';
     record.expires = now + PERMIT_TTL_MS;
@@ -195,4 +202,4 @@ function acceptNativeAnswer(record, action, now = Date.now()) {
   return { status: 'denied', eventId: record.eventId };
 }
 
-module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, acceptNativeAnswer, hostQuestionText };
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
