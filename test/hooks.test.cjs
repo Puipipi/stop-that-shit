@@ -749,6 +749,30 @@ for (const name of ['$stop-that-shit', '$stop-that-shit:stop-that-shit']) {
   });
 }
 
+test('runtime commands isolate controller-emitted child and sibling audit events', (t) => {
+  const options = workspace(t);
+  const session = 'runtime-child-agent-filter';
+  const childOne = 'child-runtime-one';
+  const childTwo = 'child-runtime-two';
+  const command = (text, agentId) => ({
+    ...prompt(session, text),
+    ...(agentId ? { agent_id: agentId } : {})
+  });
+
+  handleHook(pre(session, 'Bash', { command: 'git status --short' }), options);
+  handleHook({ ...pre(session, 'Bash', { command: 'git diff --stat' }), agent_id: childOne }, options);
+  handleHook({ ...pre(session, 'Bash', { command: 'git log -1 --oneline' }), agent_id: childTwo }, options);
+
+  const oneStatus = handleHook(command('$stop-that-shit status', childOne), options);
+  const oneRuntime = handleHook(command('$stop-that-shit runtime', childOne), options);
+  const twoRuntime = handleHook(command('$stop-that-shit runtime', childTwo), options);
+  const parentRuntime = handleHook(command('$stop-that-shit runtime'), options);
+  assert.match(oneStatus.hookSpecificOutput.additionalContext, new RegExp(`Agent: ${childOne}`));
+  assert.match(oneRuntime.hookSpecificOutput.additionalContext, /checked actions: 1/i);
+  assert.match(twoRuntime.hookSpecificOutput.additionalContext, /checked actions: 1/i);
+  assert.match(parentRuntime.hookSpecificOutput.additionalContext, /checked actions: 3/i);
+});
+
 // These fixtures use the model-facing Rust SpawnAgentResult / WaitAgentResult
 // shapes; no host-invented reservation_id or async_launched completion flag.
 test('Codex maps spawn output to running and never turns request intent into completion', () => {
