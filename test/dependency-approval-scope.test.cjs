@@ -29,10 +29,10 @@ test('approval policy digest binds only decision-relevant effective contract fie
   assert.equal(policyDigest({ ...contract, allowedPaths: ['test', 'src'] }), initial);
   if (typeof contracts.narrowContract === 'function') {
     const childWithPartialDirective = { ...contract, mode: 'unconfirmed', dependencyPolicy: 'deny', source: 'directive' };
-    const effective = approvalScope.effectiveChildContract(
-      { ...contract, mode: 'change', dependencyPolicy: 'allow' }, childWithPartialDirective);
-    assert.equal(effective.mode, 'change', 'a partial child directive inherits the parent task mode');
-    assert.equal(effective.dependencyPolicy, 'deny', 'a child can still narrow the dependency policy');
+    const parent = { ...contract, mode: 'change', dependencyPolicy: 'allow' };
+    assert.deepEqual(approvalScope.effectiveChildContract(parent, childWithPartialDirective),
+      contracts.narrowContract(parent, childWithPartialDirective),
+      'effective child policy uses the host contract API without special defaults');
   }
 });
 
@@ -173,6 +173,8 @@ test('a parent approval is never a child approval', t => {
     && stateStore.childStatePath(session_id, agent_id, dataDir) !== stateStore.statePath(session_id, dataDir);
 
   prompt('$stop-that-shit change deps=ask -- exact install');
+  handleHook({ ...base, agent_id, hook_event_name: 'UserPromptSubmit',
+    prompt: '$stop-that-shit change deps=ask -- child owns a separate approval' }, { dataDir });
   before('parent-approval-action');
   const denial = before('parent-approval-action');
   const match = /Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denial.hookSpecificOutput.permissionDecisionReason);
@@ -200,7 +202,35 @@ test('a parent approval is never a child approval', t => {
   }
 });
 
-test('a fresh child partial directive starts from parent raw contract and stays child-owned', t => {
+test('an explicit child review contract denies dependency work while the parent change contract allows it', t => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-child-review-policy-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const session_id = 'parent-change-child-review';
+  const agent_id = 'child-review-policy';
+  if (!supportsScopedState(session_id, agent_id, dataDir)) {
+    t.skip('requires PR109 scoped child-state APIs');
+    return;
+  }
+  const base = { session_id, turn_id: 'turn-1', cwd: process.cwd() };
+  const options = { dataDir };
+  const prompt = (text, child = false) => handleHook({ ...base, ...(child ? { agent_id } : {}),
+    hook_event_name: 'UserPromptSubmit', prompt: text }, options);
+  const install = (id, child = false) => handleHook({ ...base, ...(child ? { agent_id } : {}),
+    hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: id,
+    tool_input: { command: 'pnpm install --offline --frozen-lockfile --ignore-scripts' } }, options);
+
+  prompt('$stop-that-shit change deps=allow -- parent permits this dependency');
+  prompt('$stop-that-shit review -- child remains read-only', true);
+  const child = install('child-review-install', true);
+  assert.equal(child?.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.equal(stateStore.readState(session_id, dataDir, { agentId: agent_id }).contract.mode, 'review');
+  assert.equal(stateStore.readState(session_id, dataDir, { agentId: agent_id }).actionApproval, null,
+    'a review decision cannot create a change-mode one-time approval');
+  assert.equal(install('parent-change-install'), null,
+    'the matching parent operation remains allowed by the parent change contract');
+});
+
+test('a fresh child partial directive preserves PR109 raw child defaults and stays child-owned', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-child-partial-directive-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const session_id = 'child-partial-directive-inherit';
@@ -219,16 +249,21 @@ test('a fresh child partial directive starts from parent raw contract and stays 
   prompt('$stop-that-shit change deps=allow hash=allow -- parent permits');
   prompt('$stop-that-shit deps=deny -- child narrows only dependencies', true);
   const child = stateStore.readState(session_id, dataDir, { agentId: agent_id });
-  assert.equal(child.contract.mode, 'change');
-  assert.equal(child.contract.hashPolicy, 'allow', 'unmentioned fresh child fields inherit the raw parent contract');
+  assert.equal(child.contract.mode, 'unconfirmed', 'partial directive leaves the child raw mode at its default');
+  assert.equal(child.contract.hashPolicy, 'deny', 'partial directive leaves the child raw hash policy at its default');
+  assert.equal(child.contract.allowedPaths, null, 'parent file bounds stay effective-only, not copied into child raw state');
   assert.equal(child.contract.dependencyPolicy, 'deny');
+  const parentContract = stateStore.readState(session_id, dataDir).contract;
+  assert.deepEqual(approvalScope.effectiveChildContract(parentContract, child.contract),
+    contracts.narrowContract(parentContract, child.contract));
   assert.equal(stateStore.readState(session_id, dataDir).contract.dependencyPolicy, 'allow',
     'the child directive does not mutate parent state');
-  assert.equal(action('child-denied', true)?.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.equal(action('child-unconfirmed', true), null,
+    'a partial directive does not activate a child change approval or inherit the parent change mode');
   assert.equal(action('parent-allowed'), null);
 });
 
-test('an uninitialized child inherits the current parent policy for decisions without persisting it', t => {
+test('an uninitialized child matches the host narrowContract default without creating an approval', t => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-approval-scope-inherit-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const session_id = 'parent-ask-child-default';
@@ -243,17 +278,29 @@ test('an uninitialized child inherits the current parent policy for decisions wi
     tool_use_id: 'child-action', tool_input: { command: 'pnpm install --offline --frozen-lockfile --ignore-scripts' } }, options);
   prompt('$stop-that-shit change deps=ask -- parent policy');
   assert.equal(parentAction()?.hookSpecificOutput?.permissionDecision, 'deny');
+  const parentRecord = stateStore.readState(session_id, dataDir).actionApproval;
   const { childStatePath } = stateStore;
   const supported = typeof childStatePath === 'function' && typeof contracts.narrowContract === 'function'
     && childStatePath(session_id, agent_id, dataDir) !== stateStore.statePath(session_id, dataDir);
+  const childRaw = supported ? stateStore.readState(session_id, dataDir, { agentId: agent_id }).contract : contracts.defaultContract();
+  const parentContract = stateStore.readState(session_id, dataDir).contract;
+  const hostEffective = supported ? contracts.narrowContract(parentContract, childRaw) : parentContract;
   const childResult = childAction();
-  assert.equal(childResult?.hookSpecificOutput?.permissionDecision, 'deny',
-    'default child state must not make a parent deps=ask policy permissive');
+  assert.deepEqual(supported ? approvalScope.effectiveChildContract(parentContract, childRaw) : parentContract, hostEffective);
+  if (supported) {
+    assert.equal(childResult, null,
+      'a fresh child remains at the host default; it does not automatically open a deps=ask approval card');
+  } else {
+    assert.equal(childResult?.hookSpecificOutput?.permissionDecision, 'deny',
+      'without scoped APIs, the standalone fallback denies deps=ask without consuming parent approval');
+  }
   assert.equal(stateStore.readState(session_id, dataDir).contract.dependencyPolicy, 'ask');
   if (supported) {
     const childState = stateStore.readState(session_id, dataDir, { agentId: agent_id });
     assert.equal(childState.contract.source, 'default', 'effective parent policy stays out of child state');
-    assert.equal(childState.actionApproval.status, 'pending', 'child proposal belongs to the child ledger');
+    assert.equal(childState.actionApproval, null, 'fresh child default creates no child approval proposal');
+    assert.deepEqual(stateStore.readState(session_id, dataDir).actionApproval, parentRecord,
+      'child default evaluation does not consume or rewrite a parent approval');
   }
 });
 
@@ -309,6 +356,7 @@ test('scoped answer and fresh runner process recheck the latest parent contract'
     ...(child ? { agent_id } : {}), hook_event_name: 'PreToolUse', tool_name, tool_use_id: id,
     tool_input: input }, options);
   prompt('$stop-that-shit change deps=ask -- parent asks');
+  prompt('$stop-that-shit change deps=ask -- child explicitly enables its own approval', true);
   const denied = action('child-dependency', 'Bash');
   assert.equal(denied?.hookSpecificOutput?.permissionDecision, 'deny');
   const record = stateStore.readState(session_id, dataDir, { agentId: agent_id }).actionApproval;
@@ -347,11 +395,13 @@ test('scoped answer and fresh runner process recheck the latest parent contract'
   const hashSession = 'scope-runner-irrelevant-hash-change';
   const hashAgent = 'child-agent-hash-policy';
   const hashBase = { session_id: hashSession, turn_id: 'turn-1', cwd: process.cwd() };
-  const hashPrompt = text => handleHook({ ...hashBase, hook_event_name: 'UserPromptSubmit', prompt: text }, options);
+  const hashPrompt = (text, child = false) => handleHook({ ...hashBase, ...(child ? { agent_id: hashAgent } : {}),
+    hook_event_name: 'UserPromptSubmit', prompt: text }, options);
   const hashAction = (id, tool_name, input = { command }, child = true) => handleHook({ ...hashBase,
     ...(child ? { agent_id: hashAgent } : {}), hook_event_name: 'PreToolUse', tool_name, tool_use_id: id,
     tool_input: input }, options);
   hashPrompt('$stop-that-shit change deps=ask hash=deny -- initial policy');
+  hashPrompt('$stop-that-shit change deps=ask hash=deny -- child opts into approval', true);
   const hashDenied = hashAction('hash-child-command', 'Bash');
   const hashMatch = /Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(hashDenied.hookSpecificOutput.permissionDecisionReason);
   assert.ok(hashMatch);
@@ -390,6 +440,7 @@ test('scoped answer and fresh runner process recheck the latest parent contract'
     ...(child ? { agent_id: answerAgent } : {}), hook_event_name: 'PreToolUse', tool_name, tool_use_id: id,
     tool_input: input }, options);
   answerPrompt('$stop-that-shit change deps=ask -- ask before answer');
+  answerPrompt('$stop-that-shit change deps=ask -- child opts into approval', true);
   const answerDenied = answerAction('answer-child-dependency', 'Bash');
   const answerMatch = /Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(answerDenied.hookSpecificOutput.permissionDecisionReason);
   assert.ok(answerMatch);
@@ -438,6 +489,7 @@ test('asynchronous proposal replies remain inside the registered child scope', t
     ...(child ? { agent_id: agent } : {}), hook_event_name: 'PreToolUse', tool_name, tool_use_id: id,
     tool_input: input }, options);
   prompt('$stop-that-shit change deps=ask -- async child approval', false);
+  prompt('$stop-that-shit change deps=ask -- child opts into approval', true);
   const denied = before('async-child-action', 'Bash', { command });
   const match = /Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denied.hookSpecificOutput.permissionDecisionReason);
   assert.ok(match);

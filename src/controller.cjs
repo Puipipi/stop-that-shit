@@ -172,9 +172,7 @@ function handleRuntimeCommand(command, event, state, options) {
 
 function handlePrompt(event, state) {
   if (state.storageError) return context(`${state.storageError.code}: ${state.storageError.message}`);
-  const previousContract = state.scope?.child
-    ? approvalScope.isUninitializedChildContract(state.childContract) ? state.parentContract : state.childContract
-    : state.contract;
+  const previousContract = state.scope?.child ? state.childContract : state.contract;
   const parsed = parseContractPrompt(event.prompt, previousContract);
   if (parsed.error) {
     state.directiveError = parsed.error;

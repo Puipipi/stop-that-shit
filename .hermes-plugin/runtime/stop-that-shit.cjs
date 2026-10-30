@@ -465,9 +465,7 @@ function handleRuntimeCommand(command, event, state, options) {
 
 function handlePrompt(event, state) {
   if (state.storageError) return context(`${state.storageError.code}: ${state.storageError.message}`);
-  const previousContract = state.scope?.child
-    ? approvalScope.isUninitializedChildContract(state.childContract) ? state.parentContract : state.childContract
-    : state.contract;
+  const previousContract = state.scope?.child ? state.childContract : state.contract;
   const parsed = parseContractPrompt(event.prompt, previousContract);
   if (parsed.error) {
     state.directiveError = parsed.error;
@@ -3482,18 +3480,9 @@ function resolve(event, options) {
 }
 
 function effectiveChildContract(parentContract, childContract) {
-  // A new child ledger has only the schema's default, not an independent
-  // contract. Until the child submits one, inherit the current parent policy
-  // for evaluation without persisting that effective value into child state.
-  const uninitialized = isUninitializedChildContract(childContract);
-  if (uninitialized) return contracts.narrowContract(parentContract, parentContract);
-  const scoped = childContract && childContract.mode === 'unconfirmed'
-    ? { ...childContract, mode: parentContract.mode } : childContract;
-  return contracts.narrowContract(parentContract, scoped);
-}
-
-function isUninitializedChildContract(childContract) {
-  return Boolean(childContract && childContract.source === 'default' && childContract.mode === 'unconfirmed');
+  // Keep the host's child contract semantics. Parent constraints are applied
+  // only to the returned effective contract, never copied into child state.
+  return contracts.narrowContract(parentContract, childContract);
 }
 
 function read(event, options) {
@@ -3555,7 +3544,7 @@ function policyDigest(contract) {
   return crypto.createHash('sha256').update(JSON.stringify(bound)).digest('hex');
 }
 
-module.exports = { agentIdFor, resolve, read, update, policyDigest, effectiveChildContract, isUninitializedChildContract };
+module.exports = { agentIdFor, resolve, read, update, policyDigest, effectiveChildContract };
 
 },
 "src/runner-command.cjs": function(module, exports, __require) {
