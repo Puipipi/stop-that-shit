@@ -35,7 +35,8 @@ function expansionDirective(input) {
 
 function slashDirective(prompt) {
   const text = String(prompt || '');
-  const match = /^(?:[ \t]*\r?\n)* {0,3}\/(?:stop-that-shit:)?stop-that-shit(?=$|[\s,:])/i.exec(text);
+  // A colon followed by a skill name belongs to that namespaced command.
+  const match = /^(?:[ \t]*\r?\n)* {0,3}\/(?:stop-that-shit:)?stop-that-shit(?=$|[\s,]|:(?=\s|$))/i.exec(text);
   if (!match) return null;
   return `$stop-that-shit${text.slice(match[0].length)}`;
 }
