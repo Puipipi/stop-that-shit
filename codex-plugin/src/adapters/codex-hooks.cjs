@@ -50,6 +50,7 @@ function toControlEvent(input) {
     kind,
     sessionId: String(input.session_id || ''),
     turnId: input.turn_id || null,
+    agent: agent || undefined,
     host: {
       family: 'codex',
       model: input.model || null,

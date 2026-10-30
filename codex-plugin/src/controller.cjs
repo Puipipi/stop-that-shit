@@ -1,13 +1,13 @@
 'use strict';
 
-const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
+const { DEFAULT_AGENT_LIMIT, boundaryContains, parseContractPrompt } = require('./contracts.cjs');
 const { SHELL_ANALYSIS_REASONS, isShellAnalysisReason, assertControlEvent, supportsLifecycleFacts } = require('./control-protocol.cjs');
 const delegationState = require('./delegation-state.cjs');
 const { inspectDelegation, applyDelegationFact } = delegationState;
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
-const { readState, recoveryState, updateSession, dataRoot } = require('./state.cjs');
+const { readState, recoveryState, removeChildState, updateSession, dataRoot } = require('./state.cjs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const approval = require('./action-approval.cjs');
@@ -82,6 +82,12 @@ const FAMILY_NAMES = { I: 'INTENT', H: 'HASH', S: 'SCOPE', T: 'THRASH' };
 function activeControlState(contract) {
   if (contract.level === 'off') return 'OFF';
   return contract.level === 'watch' ? 'OBSERVING' : 'ARMED';
+}
+
+function widensFileBoundary(previous, next) {
+  if (previous === null) return false;
+  if (!Array.isArray(next)) return true;
+  return next.some(pattern => !previous.some(container => boundaryContains(container, pattern)));
 }
 
 function decisionMessage(result, contract, event, responseOutcome, analysisReason) {
@@ -179,6 +185,16 @@ function handlePrompt(event, state) {
     state.directiveWarning = null;
     state.lastPromptContext = null;
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
+  }
+  if (state.scope?.child && widensFileBoundary(state.childContract.allowedPaths, parsed.contract.allowedPaths)) {
+    state.directiveError = {
+      code: 'FILE_BOUNDARY_WIDEN',
+      message: 'A subagent can narrow its inherited files= boundary, but cannot widen it.'
+    };
+    state.directiveWarning = null;
+    state.lastPromptContext = null;
+    return { kind: 'prompt-error', error: state.directiveError,
+      message: `${state.directiveError.code}: ${state.directiveError.message}` };
   }
   if (state.scope?.child) {
     if (parsed.directive || parsed.correction) state.childContract = parsed.contract;
@@ -569,8 +585,14 @@ function handleLifecycleContext(event, options) {
   // without waiting for another writer or rewriting state during shutdown.
   const readOnly = event.kind === 'session.start'
     || event.kind === 'session.end' && event.allDelegationsStopped !== true;
-  return readOnly ? update(readState(event.sessionId, options.dataDir))
+  const result = readOnly ? update(readState(event.sessionId, options.dataDir))
     : coordinatedUpdate(event, options, update);
+  if (event.kind === 'session.end') {
+    const state = readState(event.sessionId, options.dataDir);
+    const stopped = new Set(state.delegation.stoppedAgentIds);
+    for (const agentId of stopped) removeChildState(event.sessionId, agentId, options.dataDir);
+  }
+  return result;
 }
 
 function handleControlEvent(rawEvent, options = {}) {
