@@ -28,6 +28,49 @@ test('handoff consumes one identity-bound temp file and cannot be replayed', t =
   assert.throws(() => consumeHandoff(handoff, binding()), /unavailable|identity|handoff/i);
 });
 
+test('handoff closes the claimed file before checking its deleted path', t => {
+  const expected = binding({ ticket: 'e'.repeat(64), actionDigest: 'f'.repeat(64) });
+  const handoff = createHandoff(expected);
+  t.after(() => { try { fs.unlinkSync(handoff.path); } catch {} });
+  const originalOpen = fs.openSync;
+  const originalClose = fs.closeSync;
+  const originalLstat = fs.lstatSync;
+  const originalUnlink = fs.unlinkSync;
+  let handoffFd;
+  let handoffClosed = false;
+  fs.openSync = function(file, ...args) {
+    const fd = originalOpen.call(fs, file, ...args);
+    if (typeof file === 'string' && file.endsWith('.claim')) handoffFd = fd;
+    return fd;
+  };
+  fs.closeSync = function(fd) {
+    if (fd === handoffFd) handoffClosed = true;
+    return originalClose.call(fs, fd);
+  };
+  let claimUnlinked = false;
+  fs.unlinkSync = function(file) {
+    originalUnlink.call(fs, file);
+    if (typeof file === 'string' && file.endsWith('.claim')) claimUnlinked = true;
+  };
+  fs.lstatSync = function(file, ...args) {
+    if (claimUnlinked && typeof file === 'string' && file.endsWith('.claim') && !handoffClosed) {
+      const error = new Error('Simulated Windows Node 18 delete-pending path');
+      error.code = 'EPERM';
+      throw error;
+    }
+    return originalLstat.call(fs, file, ...args);
+  };
+  try {
+    assert.equal(consumeHandoff(handoff, expected), true);
+    assert.equal(handoffClosed, true);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.closeSync = originalClose;
+    fs.lstatSync = originalLstat;
+    fs.unlinkSync = originalUnlink;
+  }
+});
+
 test('handoff metadata accepts a temp-root alias that resolves to the canonical root', t => {
   const originalTmpdir = os.tmpdir;
   const actualTmpdir = fs.realpathSync(originalTmpdir());

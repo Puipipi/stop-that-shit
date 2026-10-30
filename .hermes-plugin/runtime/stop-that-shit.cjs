@@ -3124,24 +3124,23 @@ function consumeHandoff(handoff, binding) {
   let fd;
   let claimedPath;
   try {
-    fd = fs.openSync(handoff.path, 'r');
-    const before = fs.fstatSync(fd, { bigint: true });
-    const beforeIdentity = fileIdentity(before);
-    if (!sameIdentity(beforeIdentity, handoff.identity)) throw new Error('One-time handoff file identity changed');
     const named = fs.lstatSync(handoff.path, { bigint: true });
     if (named.isSymbolicLink() || !sameIdentity(fileIdentity(named), handoff.identity)) throw new Error('One-time handoff path identity changed');
+    // rename is the atomic winner election. Only its winner opens the claimed
+    // path, so losing contenders do not keep delete-pending handles on Windows.
+    claimedPath = path.join(handoff.tempRoot, `.sts-dependency-${crypto.randomBytes(32).toString('hex')}.claim`);
+    fs.renameSync(handoff.path, claimedPath);
+    const claimed = fs.lstatSync(claimedPath, { bigint: true });
+    if (claimed.isSymbolicLink() || !sameIdentity(fileIdentity(claimed), handoff.identity)) {
+      throw new Error('Claimed handoff path identity changed');
+    }
+    fd = fs.openSync(claimedPath, 'r');
+    const opened = fs.fstatSync(fd, { bigint: true });
+    if (!sameIdentity(fileIdentity(opened), handoff.identity)) throw new Error('Claimed handoff identity changed');
     const bytes = readHandle(fd);
     if (!bytes.equals(expected) || crypto.createHash('sha256').update(bytes).digest('hex') !== handoff.sha256) {
       throw new Error('One-time handoff contents changed');
     }
-    // rename is the atomic winner election. On Windows, unlinking the original
-    // path while two contenders already hold handles can succeed twice.
-    claimedPath = path.join(handoff.tempRoot, `.sts-dependency-${crypto.randomBytes(32).toString('hex')}.claim`);
-    fs.renameSync(handoff.path, claimedPath);
-    const claimed = fs.lstatSync(claimedPath, { bigint: true });
-    if (claimed.isSymbolicLink() || !sameIdentity(fileIdentity(claimed), handoff.identity)
-        || !statHasIdentity(fs.fstatSync(fd, { bigint: true }), handoff.identity)
-        || !readHandle(fd).equals(expected)) throw new Error('Claimed handoff identity changed');
     try {
       fs.lstatSync(handoff.path);
       throw new Error('One-time handoff source path was replaced during claim');
@@ -3153,6 +3152,8 @@ function consumeHandoff(handoff, binding) {
     if (!statHasIdentity(after, handoff.identity) || after.nlink !== 0n) {
       throw new Error('One-time handoff was not atomically unlinked');
     }
+    fs.closeSync(fd);
+    fd = undefined;
     for (const file of [handoff.path, claimedPath]) try {
       fs.lstatSync(file);
       throw new Error('One-time handoff path was replaced during consumption');
@@ -3163,7 +3164,7 @@ function consumeHandoff(handoff, binding) {
     if (error.code === 'ENOENT') throw new Error('One-time handoff is already consumed or unavailable');
     throw error;
   } finally {
-    if (fd !== undefined && claimedPath) {
+    if (claimedPath) {
       try {
         const stat = fs.lstatSync(claimedPath, { bigint: true });
         if (!stat.isSymbolicLink() && statHasIdentity(stat, handoff.identity)) fs.unlinkSync(claimedPath);
