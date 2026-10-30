@@ -746,7 +746,7 @@ function naturalCorrection(prompt, previous) {
     return { mode: 'answer', source: 'explicit-stop' };
   }
   if (/\breview only\b|\b(?:do not|don't) (?:edit|change|fix) (?:anything|the (?:repo|repository|files?|code))\b/i.test(text)
-      || /(?:^|[\n，,。.!！；;])[ \t]*(?:(?:请|这次|本次|现在|接下来|先)[ \t]*)*(?:只审查|只看不改|不要修改(?:任何|代码|文件))/u.test(text)) {
+      || /(?:^|[\n，,。.!！；;])[ \t]*(?:(?:请你|请|注意[：:]?|这次|本次|现在|接下来|先)[ \t]*)*(?:只审查|只看不改|不要修改(?:任何|代码|文件))/u.test(text)) {
     return { mode: 'review', source: 'natural-explicit' };
   }
   if (/\banswer only\b|只回答/i.test(text)) {

@@ -27,6 +27,12 @@ test('Codex stdin preserves role-scoped review and honors explicit review bounda
     assert.equal(readState(session, dataDir).contract.mode, 'change');
     assert.equal(readState(session, dataDir).contract.hashPolicy, 'deny');
   }
+  for (const [session, prompt] of [['polite-review', '请你不要修改代码'], ['attention-review', '注意：不要修改代码']]) {
+    call(session, 'UserPromptSubmit', { prompt: '$stop-that-shit change -- task' });
+    call(session, 'UserPromptSubmit', { prompt });
+    assert.equal(readState(session, dataDir).contract.mode, 'review', session);
+    assert.match(call(session, 'PreToolUse', { tool_name: 'apply_patch', tool_use_id: 'write', tool_input: { patch: '*** Begin Patch' } }).hookSpecificOutput.permissionDecisionReason, /MODE_FORBIDS_MUTATION/);
+  }
   const auditPath = path.join(dataDir, 'runtime', 'mode-changes', `${require('../src/state.cjs').sessionKey('plain')}.jsonl`);
   const audit = fs.readFileSync(auditPath, 'utf8');
   assert.doesNotMatch(audit, /主只审查|执行任务/);
