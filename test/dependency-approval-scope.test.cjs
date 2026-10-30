@@ -13,6 +13,18 @@ const { policyDigest } = approvalScope;
 const { spawnSync } = require('node:child_process');
 const { readRuntime } = require('../src/runtime-audit.cjs');
 
+// Scope tests fingerprint package managers but must never depend on a host install.
+const managerFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-scope-managers-'));
+const previousPath = process.env.PATH;
+const pnpmBin = path.join(managerFixture, 'node_modules', 'pnpm', 'bin');
+fs.mkdirSync(pnpmBin, { recursive: true });
+fs.writeFileSync(path.join(pnpmBin, 'pnpm.cjs'), '// test-only manager fixture\n');
+process.env.PATH = [managerFixture, previousPath || ''].join(path.delimiter);
+test.after(() => {
+  process.env.PATH = previousPath;
+  fs.rmSync(managerFixture, { recursive: true, force: true });
+});
+
 function supportsScopedState(sessionId, agentId, dataDir) {
   return typeof stateStore.childStatePath === 'function'
     && typeof contracts.narrowContract === 'function'
