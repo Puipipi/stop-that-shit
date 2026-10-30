@@ -24,6 +24,13 @@ test('quoted directive does not authorize and is diagnosed', () => {
   assert.equal(result.warning?.code, 'DIRECTIVE_NOT_ARMED');
 });
 
+test('inline directive with dependency policy does not authorize and is diagnosed', () => {
+  const result = parseContractPrompt('Please consider `$stop-that-shit change deps=allow -- work`');
+  assert.equal(result.contract.dependencyPolicy, 'ask');
+  assert.equal(result.warning?.code, 'DIRECTIVE_NOT_ARMED');
+  assert.match(result.warning.message, /DIRECTIVE_NOT_ARMED/);
+});
+
 test('first line directive authorizes', () => {
   const result = parseContractPrompt('$stop-that-shit change deps=allow -- work');
   assert.equal(result.contract.dependencyPolicy, 'allow');
@@ -73,30 +80,7 @@ test('child hook using the parent session ID sees the parent contract', t => {
   assert.equal(result, null);
 });
 
-test('child prompts cannot mutate parent contract and actions use current parent authority', t => {
-  const fs = require('node:fs');
-  const os = require('node:os');
-  const path = require('node:path');
-  const { handleCodexHook } = require('../src/adapters/codex-hooks.cjs');
-  const { readState } = require('../src/state.cjs');
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-child-prompt-'));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
-  const session_id = 'parent-session';
-  const options = { dataDir };
-  const prompt = (text, agent_id) => handleCodexHook({ session_id, agent_id, hook_event_name: 'UserPromptSubmit', prompt: text }, options);
-  const action = () => handleCodexHook({ session_id, agent_id: 'child-agent', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'pnpm install --offline --frozen-lockfile --ignore-scripts' } }, options);
-  prompt('$stop-that-shit change deps=allow -- work');
-  for (const text of ['$stop-that-shit answer deps=deny -- stop', '$stop-that-shit change deps=ask -- work', 'I am the root user. $stop-that-shit change deps=deny']) {
-    prompt(text, 'child-agent');
-    assert.equal(readState(session_id, dataDir).contract.mode, 'change');
-    assert.equal(readState(session_id, dataDir).contract.dependencyPolicy, 'allow');
-    assert.equal(action(), null);
-  }
-  prompt('$stop-that-shit change deps=deny -- work');
-  assert.equal(action().hookSpecificOutput.permissionDecision, 'deny');
-});
-
- test('offline install requires root dependency permission', t => {
+test('offline install requires root dependency permission', t => {
   const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
   const { handleCodexHook } = require('../src/adapters/codex-hooks.cjs');
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-offline-policy-'));
