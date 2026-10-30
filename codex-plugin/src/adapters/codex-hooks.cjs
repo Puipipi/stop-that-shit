@@ -62,6 +62,11 @@ function toControlEvent(input) {
       if (!questionDigest) return null;
       const questionId = questions[0].id;
       const answers = response.answers;
+      if (Object.keys(answers).length === 0 && Object.keys(response).length === 1
+          && Object.keys(input.tool_input).length === 1 && Object.hasOwn(input.tool_input, 'questions')) {
+        event.action = { id: actionId, name: toolName, questionId, questionDigest, unanswered: true, cwd: input.cwd };
+        return event;
+      }
       if (Object.keys(answers).length !== 1 || !Object.hasOwn(answers, questionId)) return null;
       const answer = answers[questionId];
       if (!answer || typeof answer !== 'object' || Array.isArray(answer)

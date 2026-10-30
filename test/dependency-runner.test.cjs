@@ -6,6 +6,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { handleHook } = require('../src/hook-policy.cjs');
+const { bindingForRecord, createHandoff, cleanupCreatedHandoffs } = require('../src/dependency-handoff.cjs');
+
+test.after(() => cleanupCreatedHandoffs());
+
+function attachHandoff(t, sessionId, record) {
+  record.handoff = createHandoff(bindingForRecord(sessionId, record));
+  t.after(() => { try { fs.unlinkSync(record.handoff.path); } catch {} });
+}
 
 test('controlled runner pins approved directory, argv and consumes ticket once', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-'));
@@ -182,6 +190,7 @@ test('runner rejects an executable changed after approval without starting it', 
   state.actionApproval = { digest: 'a'.repeat(64), eventId: 'evt_00000000-0000-0000-0000-000000000000',
     questionPrefix: 'prefix', question: 'question', questionId: 'id', questionCallId: 'q', deniedActionId: 'a',
     expires: Date.now() + 30000, proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: cwd, targetCwd: cwd, ticket: 'a'.repeat(64), argv: ['pnpm', 'install'], manager, approvedAction: { mutability: 'write', hashIntent: false, affectedPaths: [], cwd } };
+  attachHandoff(t, 'changed', state.actionApproval);
   writeState('changed', state, root);
   fs.appendFileSync(entry, '\n// changed');
   const result = spawnSync(process.execPath, [path.join(__dirname, '../src/dependency-runner.cjs'), 'changed', root, 'a'.repeat(64)], { encoding: 'utf8' });
@@ -190,7 +199,7 @@ test('runner rejects an executable changed after approval without starting it', 
   assert.equal(fs.existsSync(marker), false);
 });
 
-test('child exit status and audit failure remain visible and ticket cannot replay', t => {
+test('runner claims its writable handoff once without trying to write the private store', t => {
   const { fingerprint } = require('../src/dependency-manager.cjs');
   const { freshState, writeState } = require('../src/state.cjs');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-exit-'));
@@ -205,14 +214,93 @@ test('child exit status and audit failure remain visible and ticket cannot repla
     expires: Date.now() + 30000, proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: fs.realpathSync(root), targetCwd: fs.realpathSync(root), ticket: 'b'.repeat(64),
     argv: ['pnpm', 'install'], manager: { kind: 'node', entry: fingerprint(entry), executable: fingerprint(process.execPath) },
     approvedAction: { mutability: 'write', hashIntent: false, affectedPaths: [], cwd: fs.realpathSync(root) } };
+  attachHandoff(t, 'exit-test', state.actionApproval);
   writeState('exit-test', state, root);
   const args = [path.join(__dirname, '../src/dependency-runner.cjs'), 'exit-test', root, 'b'.repeat(64)];
   const first = spawnSync(process.execPath, args, { encoding: 'utf8' });
   assert.equal(first.status, 23);
-  assert.match(first.stderr, /audit unavailable/);
+  assert.equal(first.stderr, '');
+  assert.equal(fs.existsSync(state.actionApproval.handoff.path), false);
+  assert.equal(require('../src/state.cjs').readState('exit-test', root).actionApproval.status, 'issued');
   const replay = spawnSync(process.execPath, args, { encoding: 'utf8' });
   assert.notEqual(replay.status, 0);
   assert.match(replay.stderr, /unavailable|expired/);
+});
+
+test('two runner processes can consume the same issued handoff but only one launches the manager', async t => {
+  const { fingerprint } = require('../src/dependency-manager.cjs');
+  const { freshState, readState, writeState } = require('../src/state.cjs');
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-handoff-race-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const entry = path.join(root, 'manager.cjs');
+  const marker = path.join(root, 'manager-runs');
+  fs.writeFileSync(entry, `require('node:fs').appendFileSync(${JSON.stringify(marker)},'x')`);
+  const cwd = fs.realpathSync(root);
+  const state = freshState();
+  state.contract = { ...state.contract, mode: 'change', level: 'guard', dependencyPolicy: 'ask' };
+  state.actionApproval = { digest: '9'.repeat(64), eventId: 'evt_00000000-0000-0000-0000-000000000000',
+    questionPrefix: 'prefix', question: 'question', questionId: 'id', questionCallId: 'q', deniedActionId: 'a',
+    expires: Date.now() + 30000, proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: cwd, targetCwd: cwd,
+    ticket: '8'.repeat(64), argv: ['pnpm', 'install'],
+    manager: { kind: 'node', entry: fingerprint(entry), executable: fingerprint(process.execPath) },
+    approvedAction: { mutability: 'write', hashIntent: false, affectedPaths: [], cwd } };
+  attachHandoff(t, 'handoff-race', state.actionApproval);
+  writeState('handoff-race', state, root);
+  const runner = path.join(__dirname, '../src/dependency-runner.cjs');
+  const children = [0, 1].map(() => spawn(process.execPath, [runner, 'handoff-race', root, '8'.repeat(64)], { stdio: ['ignore', 'pipe', 'pipe'] }));
+  const results = await Promise.all(children.map(child => new Promise((resolve, reject) => {
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.once('error', reject);
+    child.once('close', code => resolve({ code, stderr }));
+  })));
+  assert.equal(results.filter(result => result.code === 0).length, 1, JSON.stringify(results));
+  assert.equal(results.filter(result => result.code !== 0).length, 1, JSON.stringify(results));
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'x');
+  assert.equal(readState('handoff-race', root).actionApproval.status, 'issued');
+  assert.equal(fs.existsSync(state.actionApproval.handoff.path), false);
+});
+
+test('runner claim waits for a coordinated contract update and rechecks the latest policy', async t => {
+  const { fingerprint } = require('../src/dependency-manager.cjs');
+  const { freshState, readState, writeState } = require('../src/state.cjs');
+  const { withCoordinationLock } = require('../src/dependency-handoff.cjs');
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-policy-race-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const entry = path.join(root, 'manager.cjs');
+  const marker = path.join(root, 'manager-runs');
+  fs.writeFileSync(entry, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')`);
+  const cwd = fs.realpathSync(root);
+  const state = freshState();
+  state.contract = { ...state.contract, mode: 'change', level: 'guard', dependencyPolicy: 'ask' };
+  state.actionApproval = { digest: '6'.repeat(64), eventId: 'evt_00000000-0000-0000-0000-000000000000',
+    questionPrefix: 'prefix', question: 'question', questionId: 'id', questionCallId: 'q', deniedActionId: 'a',
+    expires: Date.now() + 30000, proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: cwd, targetCwd: cwd,
+    ticket: '7'.repeat(64), argv: ['pnpm', 'install'],
+    manager: { kind: 'node', entry: fingerprint(entry), executable: fingerprint(process.execPath) },
+    approvedAction: { mutability: 'write', hashIntent: false, affectedPaths: [], cwd } };
+  attachHandoff(t, 'policy-race', state.actionApproval);
+  writeState('policy-race', state, root);
+  const runner = path.join(__dirname, '../src/dependency-runner.cjs');
+  let child;
+  withCoordinationLock('policy-race', root, () => {
+    child = spawn(process.execPath, [runner, 'policy-race', root, '7'.repeat(64)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const current = readState('policy-race', root);
+    current.contract = { ...current.contract, dependencyPolicy: 'deny' };
+    writeState('policy-race', current, root);
+  });
+  const result = await new Promise((resolve, reject) => {
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.once('error', reject);
+    child.once('close', code => resolve({ code, stderr }));
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /unavailable|no longer satisfies current policy/);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(readState('policy-race', root).actionApproval.status, 'issued');
 });
 
 test('a failed native executable launch consumes the ticket and reports an error', t => {
@@ -229,6 +317,7 @@ test('a failed native executable launch consumes the ticket and reports an error
     expires: Date.now() + 30000, proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: fs.realpathSync(root), targetCwd: fs.realpathSync(root), ticket: 'c'.repeat(64),
     argv: ['pnpm', 'install'], manager: { kind: 'native', entry: fingerprint(entry), launchPath: entry },
     approvedAction: { mutability: 'write', hashIntent: false, affectedPaths: [], cwd: fs.realpathSync(root) } };
+  attachHandoff(t, 'error-test', state.actionApproval);
   writeState('error-test', state, root);
   const args = [path.join(__dirname, '../src/dependency-runner.cjs'), 'error-test', root, 'c'.repeat(64)];
   const first = spawnSync(process.execPath, args, { encoding: 'utf8' });
@@ -255,6 +344,7 @@ test('runner rechecks tightened file and hash gates before consuming a ticket', 
       questionPrefix: 'prefix', question: 'question', questionId: 'id', questionCallId: 'q', deniedActionId: 'a',
       expires: Date.now() + 30000, proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: fs.realpathSync(root), targetCwd: fs.realpathSync(root), ticket: 'd'.repeat(64),
       argv: ['pnpm', 'install'], manager, approvedAction: { mutability: 'write', hashIntent: true, affectedPaths: [], cwd: fs.realpathSync(root) } };
+    attachHandoff(t, session, state.actionApproval);
     writeState(session, state, root);
     const result = spawnSync(process.execPath, [path.join(__dirname, '../src/dependency-runner.cjs'), session, root, 'd'.repeat(64)], { encoding: 'utf8' });
     assert.notEqual(result.status, 0, session);

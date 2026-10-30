@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { directDependencyArguments } = require('./shell-analysis.cjs');
 const { resolveManager } = require('./dependency-manager.cjs');
+const { validMetadata } = require('./dependency-handoff.cjs');
 
 const PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
 const PERMIT_TTL_MS = 10 * 60 * 1000;
@@ -67,7 +68,8 @@ function live(record, now = Date.now()) {
       && typeof record.syncRegistrationCwd === 'string' && path.isAbsolute(record.syncRegistrationCwd))
     && Number.isSafeInteger(record.proposalExpires) && Number.isSafeInteger(record.expires)
     && (['pending', 'question'].includes(record.status) ? record.proposalExpires : record.expires) > now
-    && ['pending', 'question', 'approved', 'issued', 'consumed'].includes(record.status);
+    && ['pending', 'question', 'approved', 'issued', 'consumed'].includes(record.status)
+    && (record.status !== 'issued' || validMetadata(record.handoff));
 }
 
 function isProposalQuestion(action, record) {
@@ -198,16 +200,19 @@ function acceptReply(record, text, now = Date.now()) {
   return { status: 'mismatch' };
 }
 
-function nativeAnswerMatches(record, action, now = Date.now()) {
+function nativeQuestionMatches(record, action, now = Date.now()) {
   if (!live(record, now) || record.status !== 'question'
       || record.questionToolName !== 'request_user_input' || action?.name !== 'request_user_input'
       || action.id !== record.questionCallId || action.questionId !== record.syncQuestionId
       || action.questionDigest !== record.syncQuestionDigest
-      || ![YES, NO].includes(action.answer)
       || typeof action.cwd !== 'string' || !path.isAbsolute(action.cwd)) return false;
   let cwd;
   try { cwd = fs.realpathSync(action?.cwd); } catch { return false; }
   return cwd === record.syncRegistrationCwd;
+}
+
+function nativeAnswerMatches(record, action, now = Date.now()) {
+  return [YES, NO].includes(action?.answer) && nativeQuestionMatches(record, action, now);
 }
 
 function acceptNativeAnswer(record, action, now = Date.now()) {
@@ -221,4 +226,4 @@ function acceptNativeAnswer(record, action, now = Date.now()) {
   return { status: 'denied', eventId: record.eventId };
 }
 
-module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeQuestionMatches, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };

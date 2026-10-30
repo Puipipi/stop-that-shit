@@ -11,6 +11,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const approval = require('./action-approval.cjs');
 const { buildRunnerCommand } = require('./runner-command.cjs');
+const { bindingForRecord, createHandoff, handoffAvailable, withCoordinationLock } = require('./dependency-handoff.cjs');
 // Keep the executable helper in the hook's statically discoverable dependency graph.
 require('./dependency-runner.cjs');
 
@@ -20,6 +21,14 @@ function none() {
 
 function context(text) {
   return { kind: 'context', text };
+}
+
+function coordinatedUpdate(event, options, update) {
+  // The runner shares this temp-root lock while claiming its one-time handoff.
+  // Hook writers take it before the private ledger lock so policy changes and
+  // runner claims have a single ordering without making the runner write private state.
+  return withCoordinationLock(event.sessionId, options.dataDir,
+    () => updateSession(event.sessionId, options.dataDir, update));
 }
 
 function contractFields(contract, summary) {
@@ -185,8 +194,9 @@ function handlePrompt(event, state) {
 }
 
 function handleApprovalAction(event, options) {
+  let orphanedHandoff = null;
   try {
-    return updateSession(event.sessionId, options.dataDir, state => {
+    const result = withCoordinationLock(event.sessionId, options.dataDir, () => updateSession(event.sessionId, options.dataDir, state => {
     if (state.storageError) return { kind: 'deny', message: state.storageError.message };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     const action = { ...event.action, duplicateActionId: summary.duplicateActionId };
@@ -194,6 +204,12 @@ function handleApprovalAction(event, options) {
     let usedApproval = null;
     let rewrittenCommand = null;
     const record = state.actionApproval;
+    if (approval.live(record) && record.status === 'issued'
+        && !handoffAvailable(record.handoff, bindingForRecord(event.sessionId, record))) {
+      record.status = 'consumed';
+      delete record.ticket;
+      delete record.handoff;
+    }
     if (result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
         && state.contract.mode === 'change' && state.contract.level === 'guard' && approval.live(record)
         && ['approved', 'issued'].includes(record.status) && event.action.id !== record.deniedActionId
@@ -209,7 +225,14 @@ function handleApprovalAction(event, options) {
             dataDir: dataRoot(options.dataDir),
             ticket
           });
+          const handoff = record.status === 'issued' ? record.handoff
+            : createHandoff(bindingForRecord(event.sessionId, record, ticket));
+          if (record.status !== 'issued') orphanedHandoff = handoff;
+          else if (!handoffAvailable(handoff, bindingForRecord(event.sessionId, record))) {
+            throw new Error('The issued one-time handoff is unavailable; it cannot be recreated.');
+          }
           record.status = 'issued';
+          record.handoff = handoff;
           record.approvedAction = {
             mutability: action.mutability,
             analysisReason: action.analysisReason,
@@ -270,8 +293,14 @@ function handleApprovalAction(event, options) {
     if (denied) return { kind: 'deny', decision: result, eventId: auditEvent && auditEvent.eventId, message };
     if (rewrittenCommand) return { kind: 'rewrite', command: rewrittenCommand };
     return responseOutcome === 'context_returned' ? context(message) : none();
-    });
+    }));
+    orphanedHandoff = null;
+    return result;
   } catch {
+    // A failed private state commit must not leave a reusable orphan capability.
+    if (orphanedHandoff) {
+      try { require('./dependency-handoff.cjs').discardHandoff(orphanedHandoff); } catch {}
+    }
     // A failed ledger lock or write cannot turn a guarded action into a fail-open call.
     return { kind: 'deny', message: 'Stop That Shit: approval state unavailable; action denied.' };
   }
@@ -337,7 +366,7 @@ function handleBeforeAction(event, options) {
   const { state, result } = options.recoveryError
     ? evaluate(recoveryState(options.recoveryError))
     : changesDelegation
-      ? updateSession(event.sessionId, options.dataDir, evaluate)
+      ? coordinatedUpdate(event, options, evaluate)
       : evaluate(readState(event.sessionId, options.dataDir));
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
@@ -367,8 +396,17 @@ function handleAfterAction(event, options) {
     if (event.host?.family !== 'codex') return none();
     try {
       const snapshot = readState(event.sessionId, options.dataDir);
+      if (event.action.unanswered === true) {
+        if (snapshot.storageError || !approval.nativeQuestionMatches(snapshot.actionApproval, event.action)) return none();
+        return coordinatedUpdate(event, options, state => {
+          if (!state.storageError && approval.nativeQuestionMatches(state.actionApproval, event.action)) {
+            state.actionApproval = null;
+          }
+          return none();
+        });
+      }
       if (snapshot.storageError || !approval.nativeAnswerMatches(snapshot.actionApproval, event.action)) return none();
-      return updateSession(event.sessionId, options.dataDir, state => {
+      return coordinatedUpdate(event, options, state => {
         if (!state.storageError) approval.acceptNativeAnswer(state.actionApproval, event.action);
         return none();
       });
@@ -378,7 +416,7 @@ function handleAfterAction(event, options) {
     }
   }
   if (!supportsLifecycleFacts(event)) return none();
-  return updateSession(event.sessionId, options.dataDir, (state) => {
+  return coordinatedUpdate(event, options, (state) => {
     // Only a declared facts adapter may report binding or completion. A false
     // async flag can be a request parameter and never proves children joined.
     const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
@@ -410,7 +448,7 @@ function handleLifecycleContext(event, options) {
   const readOnly = event.kind === 'session.start'
     || event.kind === 'session.end' && event.allDelegationsStopped !== true;
   return readOnly ? update(readState(event.sessionId, options.dataDir))
-    : updateSession(event.sessionId, options.dataDir, update);
+    : coordinatedUpdate(event, options, update);
 }
 
 function handleControlEvent(rawEvent, options = {}) {
@@ -423,7 +461,7 @@ function handleControlEvent(rawEvent, options = {}) {
       const command = runtimeCommand(event.prompt);
       return command
         ? handleRuntimeCommand(command, event, readState(event.sessionId, options.dataDir), options)
-        : updateSession(event.sessionId, options.dataDir, state => handlePrompt(event, state));
+        : coordinatedUpdate(event, options, state => handlePrompt(event, state));
     }
     case 'action.before':
       return handleBeforeAction(event, options);

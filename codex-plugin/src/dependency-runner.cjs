@@ -2,15 +2,16 @@
 
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
-const { updateSession } = require('./state.cjs');
+const { readState } = require('./state.cjs');
 const { live } = require('./action-approval.cjs');
+const { bindingForRecord, consumeHandoff, withCoordinationLock } = require('./dependency-handoff.cjs');
 const { unchanged } = require('./dependency-manager.cjs');
-const { recordDecision } = require('./runtime-audit.cjs');
 const { decide } = require('./decision.cjs');
 const { inspectDelegation } = require('./delegation-state.cjs');
 
 function claim(sessionId, dataDir, ticket) {
-  return updateSession(sessionId, dataDir, state => {
+  return withCoordinationLock(sessionId, dataDir, () => {
+    const state = readState(sessionId, dataDir);
     const record = state.actionApproval;
     if (state.storageError || !live(record) || record.status !== 'issued' || record.ticket !== ticket
         || state.contract.mode !== 'change' || state.contract.level !== 'guard'
@@ -24,17 +25,7 @@ function claim(sessionId, dataDir, ticket) {
     const action = { ...record.approvedAction, cwd: record.targetCwd, dependencyIntent: false };
     const decision = decide({ contract: state.contract, action, delegation: inspectDelegation(state.delegation), state });
     if (decision.outcome !== 'allow') throw new Error(`Approved operation no longer satisfies current policy: ${decision.reasonCode}`);
-    record.status = 'consumed';
-    delete record.ticket;
-    try {
-      const audit = recordDecision({ sessionId, contract: state.contract, delegation: state.delegation,
-        action: { name: 'dependency-runner', mutability: 'write', dependencyIntent: true },
-        decision: { outcome: 'allow', reasonCode: 'WITHIN_CONTRACT' }, responseOutcome: 'none',
-        approval: { eventId: record.eventId, questionCallId: record.questionCallId, consumed: true } }, { dataDir });
-      if (!audit) process.stderr.write('Stop That Shit: approval audit unavailable.\n');
-    } catch {
-      process.stderr.write('Stop That Shit: approval audit unavailable.\n');
-    }
+    consumeHandoff(record.handoff, bindingForRecord(sessionId, record, ticket));
     return { cwd: record.targetCwd, manager: record.manager, args: record.argv.slice(1) };
   });
 }

@@ -1,6 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
 const {handleHook}=require('../src/hook-policy.cjs');
+const {cleanupCreatedHandoffs}=require('../src/dependency-handoff.cjs');
 
 // Approval tests must not depend on package managers installed on the host.
 // The entries are fingerprinted but never executed by this suite.
@@ -13,6 +14,7 @@ for (const [manager, entry] of [['pnpm', 'pnpm.cjs'], ['npm', 'npm-cli.js']]) {
 }
 process.env.PATH = [managerFixture, previousPath || ''].join(path.delimiter);
 test.after(() => {
+  cleanupCreatedHandoffs();
   process.env.PATH = previousPath;
   fs.rmSync(managerFixture, { recursive: true, force: true });
 });
@@ -102,15 +104,88 @@ test('ordinary synchronous questions do not write or wait on the session ledger'
  fs.mkdirSync(lockDirectory);
  fs.writeFileSync(path.join(lockDirectory,`${process.pid}-00000000-0000-4000-8000-000000000000`),'');
  t.after(()=>fs.rmSync(lockDirectory,{recursive:true,force:true}));
- const question={id:'ordinary-question',header:'Question',question:'Which option should I use?',options:[
-  {label:'Allow this operation once',description:'Select the first answer.'},
-  {label:'Deny this operation',description:'Select the second answer.'}
+ const question={id:'ordinary-question',header:require('../src/action-approval.cjs').SYNC_HEADER,question:'Which option should I use?',options:[
+  {label:'Allow this operation once',description:'Authorize this operation once.'},
+  {label:'Deny this operation',description:'Do not authorize this operation.'}
  ]};
  assert.equal(handleHook({...base,hook_event_name:'PreToolUse',tool_name:'request_user_input',tool_use_id:'ordinary-call',tool_input:{questions:[question]}},opt),null);
  assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'ordinary PreToolUse leaves the session file untouched');
  assert.equal(handleHook({...base,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:'ordinary-call',tool_input:{questions:[question]},
   tool_response:{answers:{'ordinary-question':{answers:['Allow this operation once']}}}},opt),null);
  assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'ordinary PostToolUse leaves the session file untouched');
+ assert.equal(handleHook({...base,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:'ordinary-call',tool_input:{questions:[question]},
+  tool_response:{answers:{}}},opt),null);
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'ordinary empty response leaves the session file untouched');
+});
+
+test('a completed synchronous question with no selected answer is retired, never granted or denied', t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-sync-empty-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const opt={dataDir:dir},base={session_id:'sync-empty',turn_id:'t',cwd:process.cwd()};
+ const prompt=text=>handleHook({...base,hook_event_name:'UserPromptSubmit',prompt:text},opt);
+ const before=(id,name,input)=>handleHook({...base,hook_event_name:'PreToolUse',tool_name:name,tool_use_id:id,tool_input:input},opt);
+ const after=(id,question,response)=>handleHook({...base,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:id,tool_input:{questions:[question]},tool_response:response},opt);
+ const {readState,statePath}=require('../src/state.cjs');
+ const state=()=>readState(base.session_id,dir).actionApproval;
+ const stateFile=statePath(base.session_id,dir);
+ const input={command:'pnpm install --offline --frozen-lockfile --ignore-scripts'};
+ prompt('$stop-that-shit change deps=ask -- work');
+ const first=before('install-1','Bash',input);
+ const firstMatch=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(first.hookSpecificOutput.permissionDecisionReason);
+ const question={id:'empty-answer-question',header:require('../src/action-approval.cjs').SYNC_HEADER,
+  question:firstMatch[1].replace('<absolute canonical directory>',fs.realpathSync(base.cwd)),
+  options:[{label:firstMatch[2],description:'Authorize this operation once.'},{label:firstMatch[3],description:'Do not authorize this operation.'}]};
+ assert.equal(before('native-empty','request_user_input',{questions:[question]}),null);
+ assert.equal(state().status,'question');
+ const oldTime=new Date(Date.now()-120000);
+ fs.utimesSync(stateFile,oldTime,oldTime);
+ const expectedMtime=fs.statSync(stateFile).mtimeMs;
+ assert.equal(after('wrong-call',question,{answers:{}}),null);
+ assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'wrong toolUseId cannot retire a registered question');
+ const changedQuestion={...question,id:'other-empty-question'};
+ assert.equal(after('native-empty',changedQuestion,{answers:{}}),null);
+ assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'changed question id cannot retire a registered question');
+ assert.equal(after('native-empty',question,{answers:{},extra:true}),null);
+ assert.equal(state().status,'question');
+ assert.equal(fs.statSync(stateFile).mtimeMs,expectedMtime,'extra response fields cannot retire a registered question');
+ assert.equal(after('native-empty',question,{answers:{}}),null);
+ assert.equal(state(),null,'a completed empty native response retires only the unanswered registration');
+ const retry=before('install-2','Bash',input);
+ assert.equal(retry.hookSpecificOutput.permissionDecision,'deny');
+ const retryMatch=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(retry.hookSpecificOutput.permissionDecisionReason);
+ assert.ok(retryMatch,'the next attempt must receive a fresh proposal');
+ assert.doesNotMatch(retry.hookSpecificOutput.permissionDecisionReason,/already bound|awaiting execution/);
+ assert.notEqual(/\((evt_[0-9a-f-]+)\)/.exec(firstMatch[1])[1],/\((evt_[0-9a-f-]+)\)/.exec(retryMatch[1])[1]);
+ assert.equal(state().status,'pending');
+});
+
+test('an issued approval never recreates a missing one-time handoff', t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-issued-handoff-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const opt={dataDir:dir},base={session_id:'issued-handoff',turn_id:'t',cwd:process.cwd()};
+ const prompt=text=>handleHook({...base,hook_event_name:'UserPromptSubmit',prompt:text},opt);
+ const before=(id,name,input)=>handleHook({...base,hook_event_name:'PreToolUse',tool_name:name,tool_use_id:id,tool_input:input},opt);
+ const {readState}=require('../src/state.cjs');
+ const input={command:'pnpm install --offline --frozen-lockfile --ignore-scripts'};
+ prompt('$stop-that-shit change deps=ask -- work');
+ const denial=before('install-1','Bash',input);
+ const match=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denial.hookSpecificOutput.permissionDecisionReason);
+ const question=match[1].replace('<absolute canonical directory>',fs.realpathSync(base.cwd));
+ assert.equal(before('question','request_user_input_async',{questions:[{title:question,options:[match[2],match[3]]}]}),null);
+ prompt(`<send_user_message_question_reply>\n${JSON.stringify([{questionItemId:JSON.stringify(['request_user_input_async','question',0]),question,answer:match[2]}])}\n</send_user_message_question_reply>`);
+ const issued=before('retry-1','Bash',input);
+ assert.equal(issued.hookSpecificOutput.permissionDecision,'allow');
+ const original=readState(base.session_id,dir).actionApproval;
+ const handoffPath=original.handoff.path;
+ fs.unlinkSync(handoffPath);
+ const replay=before('retry-2','Bash',input);
+ assert.equal(replay.hookSpecificOutput.permissionDecision,'deny');
+ assert.equal(Object.hasOwn(replay.hookSpecificOutput,'updatedInput'),false);
+ const current=readState(base.session_id,dir).actionApproval;
+ assert.equal(current.status,'pending');
+ assert.notEqual(current.eventId,original.eventId);
+ assert.equal(Object.hasOwn(current,'ticket'),false);
+ assert.equal(fs.existsSync(handoffPath),false);
 });
 
 test('only the exact synchronous tool result can approve or deny the registered proposal', t => {
@@ -132,7 +207,6 @@ test('only the exact synchronous tool result can approve or deny the registered 
  const stateFile=statePath(base.session_id,dir);
  function ageStateFile(){const oldTime=new Date(Date.now()-120000);fs.utimesSync(stateFile,oldTime,oldTime);return fs.statSync(stateFile).mtimeMs;}
  for (const result of [
-  {answers:{}},
   {answers:{other:{answers:[match[2]]}}},
   {answers:{'sync-question':{answers:[]}}},
   {answers:{'sync-question':{answers:[match[2],match[3]]}}},

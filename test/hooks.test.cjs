@@ -775,7 +775,7 @@ test('Codex wait releases only explicit UUID targets with proven terminal result
   assert.equal(toControlEvent({ ...base, tool_input: { targets: ['/root/scout'] }, tool_response: { status: { '/root/scout': { completed: 'done' } }, timed_out: false } }), null);
 });
 
-test('Codex native approval result normalizer keeps only a selected exact option', () => {
+test('Codex native approval result normalizer keeps selected exact options and bound empty completion only', () => {
   const { toControlEvent } = require('../src/adapters/codex-hooks.cjs');
   const question = { id: 'approval-1', header: 'Approval', question: 'Allow this operation once?', options: [
     { label: 'Allow this operation once', description: 'Authorize this operation once.' },
@@ -794,8 +794,15 @@ test('Codex native approval result normalizer keeps only a selected exact option
     assert.equal(Object.hasOwn(event.action, 'question'), false);
     assert.equal(Object.hasOwn(event.action, 'tool_response'), false);
   }
+  for (const tool_response of [{ answers: {} }, JSON.stringify({ answers: {} })]) {
+    const event = toControlEvent({ ...base, tool_response });
+    assert.equal(event.action.id, 'native-call-1');
+    assert.equal(event.action.questionId, 'approval-1');
+    assert.equal(event.action.unanswered, true);
+    assert.equal(Object.hasOwn(event.action, 'answer'), false);
+    assert.equal(Object.hasOwn(event.action, 'tool_response'), false);
+  }
   for (const tool_response of [
-    { answers: {} },
     { answers: { other: { answers: ['Allow this operation once'] } } },
     { answers: { 'approval-1': { answers: [] } } },
     { answers: { 'approval-1': { answers: ['Allow this operation once', 'Deny this operation'] } } },
@@ -803,6 +810,7 @@ test('Codex native approval result normalizer keeps only a selected exact option
     { answers: { 'approval-1': { answers: ['Allow this operation once'] }, other: { answers: ['Deny this operation'] } } },
     { answers: { 'approval-1': { answers: ['Allow this operation once'] } }, log: 'Allow this operation once' }
   ]) assert.equal(toControlEvent({ ...base, tool_response }), null);
+  assert.equal(toControlEvent({ ...base, tool_input: { questions: [question], other: true }, tool_response: { answers: {} } }), null);
   assert.equal(toControlEvent({ ...base, tool_use_id: undefined, tool_call_id: 'native-call-1', tool_response: selected }), null);
 });
 
