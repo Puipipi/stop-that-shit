@@ -123,7 +123,12 @@ one native approval question tied to that exact command and its proposed target
 directory. Choose the explicit allow or deny option in the question. Closing it,
 leaving it unanswered, or replying with ordinary text does not grant
 permission. An allow permits one matching retry within ten minutes; the session
-policy remains `deps=ask`.
+policy remains `deps=ask`. In a delegated Codex agent, the proposal, answer and
+one-time runner ticket stay in that agent's child state. The child is evaluated
+against the latest parent and child contract, and a parent approval cannot be
+reused by a child. If the host does not provide its child-state API, scoped
+approval questions and child contract changes are refused; ordinary child
+clarification and non-approval tools keep their normal path.
 
 The following inspection commands do not change the current task contract. In
 Claude Code, pass the text after the namespaced slash command; in Codex, use the

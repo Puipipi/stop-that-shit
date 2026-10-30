@@ -6,6 +6,8 @@ const path = require('node:path');
 const { directDependencyArguments } = require('./shell-analysis.cjs');
 const { resolveManager } = require('./dependency-manager.cjs');
 const { validMetadata } = require('./dependency-handoff.cjs');
+const { decide } = require('./decision.cjs');
+const { inspectDelegation } = require('./delegation-state.cjs');
 
 const PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
 const PERMIT_TTL_MS = 10 * 60 * 1000;
@@ -28,11 +30,13 @@ function digest(event) {
       || !action.id || Buffer.byteLength(action.id, 'utf8') > 256
       || !action.cwd || !action.input || typeof action.input.command !== 'string') return null;
   if (!directDependencyArguments(action.input.command) || /[\r\n]/.test(action.input.command)) return null;
-  const bound = stable({ session: event.sessionId, tool: action.name, input: action.input, cwd: action.cwd });
-  return crypto.createHash('sha256').update(JSON.stringify(bound)).digest('hex');
+  const bound = { session: event.sessionId, tool: action.name, input: action.input, cwd: action.cwd };
+  if (event.agent?.agentId) bound.agentId = event.agent.agentId;
+  const canonicalBound = stable(bound);
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalBound)).digest('hex');
 }
 
-function newPending(event, eventId, now = Date.now()) {
+function newPending(event, eventId, now = Date.now(), scope = {}) {
   const actionDigest = digest(event);
   if (!actionDigest || !eventId) return null;
   const argv = directDependencyArguments(event.action.input.command);
@@ -44,8 +48,26 @@ function newPending(event, eventId, now = Date.now()) {
   const proposalExpires = now + PROPOSAL_TTL_MS;
   const questionPrefix = `${PROPOSAL_PREFIX}. Reply by ${new Date(proposalExpires).toISOString()}; if allowed, run once within 10 minutes after your reply: ${JSON.stringify(argv)} using ${JSON.stringify(manager.launchPath || manager.entry.path)} (${eventId}) in directory: `;
   if (Buffer.byteLength(questionPrefix, 'utf8') > 8192) return null;
-  return { digest: actionDigest, eventId, questionPrefix, argv, manager,
+  const record = { digest: actionDigest, eventId, questionPrefix, argv, manager,
     deniedActionId: event.action.id, expires: proposalExpires, proposalExpires, status: 'pending' };
+  record.proposedAction = {
+    mutability: event.action.mutability || 'unknown',
+    analysisReason: event.action.analysisReason || null,
+    hashIntent: Boolean(event.action.hashIntent),
+    reachability: event.action.reachability || null,
+    authorization: event.action.authorization || null,
+    affectedPaths: Array.isArray(event.action.affectedPaths) ? event.action.affectedPaths.slice(0, 128) : [],
+    cwd: event.action.cwd,
+    unboundedDelegation: Boolean(event.action.unboundedDelegation),
+    delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
+  };
+  if (scope.agentId) {
+    if (typeof scope.agentId !== 'string' || !scope.agentId.trim() || Buffer.byteLength(scope.agentId, 'utf8') > 4096
+        || !/^[a-f0-9]{64}$/.test(scope.policyDigest || '')) return null;
+    record.scopeAgentId = scope.agentId;
+    record.policyDigest = scope.policyDigest;
+  }
+  return record;
 }
 
 function live(record, now = Date.now()) {
@@ -58,6 +80,8 @@ function live(record, now = Date.now()) {
     && record.manager.entry && typeof record.manager.entry.path === 'string'
     && (record.manager.kind !== 'node' || record.manager.executable && typeof record.manager.executable.path === 'string')
     && (record.status === 'pending' || typeof record.question === 'string' && Buffer.byteLength(record.question, 'utf8') <= 8192)
+    && (record.status === 'issued' ? validDecisionAction(record.approvedAction)
+      : record.proposedAction === undefined || validDecisionAction(record.proposedAction))
     && typeof record.deniedActionId === 'string' && record.deniedActionId.length > 0
     && (record.status === 'pending' || typeof record.questionId === 'string'
       && typeof record.questionCallId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(record.questionCallId))
@@ -67,9 +91,38 @@ function live(record, now = Date.now()) {
       && /^[a-f0-9]{64}$/.test(record.syncQuestionDigest || '')
       && typeof record.syncRegistrationCwd === 'string' && path.isAbsolute(record.syncRegistrationCwd))
     && Number.isSafeInteger(record.proposalExpires) && Number.isSafeInteger(record.expires)
+    && (record.scopeAgentId === undefined || typeof record.scopeAgentId === 'string'
+      && record.scopeAgentId.trim() && Buffer.byteLength(record.scopeAgentId, 'utf8') <= 4096
+      && /^[a-f0-9]{64}$/.test(record.policyDigest || ''))
     && (['pending', 'question'].includes(record.status) ? record.proposalExpires : record.expires) > now
     && ['pending', 'question', 'approved', 'issued', 'consumed'].includes(record.status)
     && (record.status !== 'issued' || validMetadata(record.handoff));
+}
+
+function validDecisionAction(action) {
+  return action && typeof action === 'object' && !Array.isArray(action)
+    && ['read', 'write', 'delegate', 'control', 'unknown'].includes(action.mutability)
+    && (action.analysisReason === undefined || action.analysisReason === null || typeof action.analysisReason === 'string')
+    && typeof action.hashIntent === 'boolean'
+    && (action.reachability === undefined || action.reachability === null || ['reachable', 'unreachable'].includes(action.reachability))
+    && (action.authorization === undefined || action.authorization === null || typeof action.authorization === 'string')
+    && Array.isArray(action.affectedPaths) && action.affectedPaths.length <= 128
+    && action.affectedPaths.every(value => typeof value === 'string' && value.length <= 8192)
+    && typeof action.cwd === 'string' && path.isAbsolute(action.cwd)
+    && (action.unboundedDelegation === undefined || typeof action.unboundedDelegation === 'boolean')
+    && (action.delegationLifecycleUnproven === undefined || typeof action.delegationLifecycleUnproven === 'boolean');
+}
+
+function proposalStillAllowed(record, contract, state = {}) {
+  if (!live(record) || contract?.mode !== 'change' || contract?.level !== 'guard'
+      || contract?.dependencyPolicy !== 'ask') return false;
+  const saved = record.status === 'issued' ? record.approvedAction : record.proposedAction;
+  if (!validDecisionAction(saved)) return saved === undefined;
+  const action = { ...saved, cwd: record.targetCwd || saved.cwd, dependencyIntent: false };
+  try {
+    const result = decide({ contract, action, state, delegation: inspectDelegation(state.delegation) });
+    return result.outcome === 'allow';
+  } catch { return false; }
 }
 
 function isProposalQuestion(action, record) {
@@ -226,4 +279,4 @@ function acceptNativeAnswer(record, action, now = Date.now()) {
   return { status: 'denied', eventId: record.eventId };
 }
 
-module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeQuestionMatches, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, proposalStillAllowed, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeQuestionMatches, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };

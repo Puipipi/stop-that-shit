@@ -202,6 +202,17 @@ function assertControlEvent(event) {
   }
   nonEmptyString(event.sessionId, 'sessionId');
 
+  if (event.agent !== undefined && event.agent !== null) {
+    if (!event.agent || typeof event.agent !== 'object' || Array.isArray(event.agent)) {
+      throw new TypeError('ControlEvent agent must be an object when provided.');
+    }
+    nonEmptyString(event.agent.agentId, 'agent.agentId');
+    if (event.agent.agentType !== undefined && event.agent.agentType !== null
+        && typeof event.agent.agentType !== 'string') {
+      throw new TypeError('ControlEvent agent.agentType must be a string when provided.');
+    }
+  }
+
   if (event.kind === 'prompt.submit' && typeof event.prompt !== 'string') {
     throw new TypeError('ControlEvent prompt.submit requires a string prompt.');
   }
@@ -215,6 +226,9 @@ function assertControlEvent(event) {
     }
     if (event.action.analysisReason !== undefined && !isShellAnalysisReason(event.action.analysisReason)) {
       throw new TypeError('Unsupported action analysis reason.');
+    }
+    if (event.action.delegationTargetId !== undefined) {
+      nonEmptyString(event.action.delegationTargetId, 'action.delegationTargetId');
     }
     if (event.action.mutability === 'delegate' || event.action.delegationLifecycleUnproven) nonEmptyString(event.action.id, 'action.id');
     if (
@@ -281,7 +295,8 @@ module.exports = {
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = __require("src/contracts.cjs");
 const { SHELL_ANALYSIS_REASONS, isShellAnalysisReason, assertControlEvent, supportsLifecycleFacts } = __require("src/control-protocol.cjs");
-const { inspectDelegation, applyDelegationFact } = __require("src/delegation-state.cjs");
+const delegationState = __require("src/delegation-state.cjs");
+const { inspectDelegation, applyDelegationFact } = delegationState;
 const { decide } = __require("src/decision.cjs");
 const { readRuntime, recordDecision } = __require("src/runtime-audit.cjs");
 const { recordAnnotation } = __require("src/runtime-annotations.cjs");
@@ -289,6 +304,7 @@ const { readState, recoveryState, updateSession, dataRoot } = __require("src/sta
 const path = require('node:path');
 const crypto = require('node:crypto');
 const approval = __require("src/action-approval.cjs");
+const approvalScope = __require("src/approval-scope.cjs");
 const { buildRunnerCommand } = __require("src/runner-command.cjs");
 const { bindingForRecord, createHandoff, handoffAvailable, withCoordinationLock } = __require("src/dependency-handoff.cjs");
 // Keep the executable helper in the hook's statically discoverable dependency graph.
@@ -296,6 +312,13 @@ __require("src/dependency-runner.cjs");
 
 function none() {
   return { kind: 'none' };
+}
+
+function targetIsActive(state, agentId) {
+  // PR109 adds authoritative target resolution. Without that API, retain the
+  // existing conservative lifecycle decision instead of guessing from names.
+  return typeof delegationState.isActiveAgent === 'function'
+    && delegationState.isActiveAgent(state, agentId);
 }
 
 function context(text) {
@@ -442,15 +465,30 @@ function handleRuntimeCommand(command, event, state, options) {
 
 function handlePrompt(event, state) {
   if (state.storageError) return context(`${state.storageError.code}: ${state.storageError.message}`);
-  const parsed = parseContractPrompt(event.prompt, state.contract);
+  const previousContract = state.scope?.child
+    ? approvalScope.isUninitializedChildContract(state.childContract) ? state.parentContract : state.childContract
+    : state.contract;
+  const parsed = parseContractPrompt(event.prompt, previousContract);
   if (parsed.error) {
     state.directiveError = parsed.error;
     state.directiveWarning = null;
     state.lastPromptContext = null;
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
-  state.contract = parsed.contract;
-  const reply = approval.acceptReply(state.actionApproval, event.prompt);
+  if (state.scope?.child) {
+    if (parsed.directive || parsed.correction) state.childContract = parsed.contract;
+    state.contract = approvalScope.effectiveChildContract(state.parentContract, state.childContract);
+  } else state.contract = parsed.contract;
+  let reply;
+  const replyEnvelope = /^\s*<send_user_message_question_reply>[\s\S]*<\/send_user_message_question_reply>\s*$/.test(event.prompt);
+  if (replyEnvelope && state.scope?.child && state.actionApproval
+      && state.actionApproval.scopeAgentId !== state.scope.agentId) {
+    reply = { status: 'unavailable' };
+  } else if (replyEnvelope && state.actionApproval
+      && !approval.proposalStillAllowed(state.actionApproval, state.contract, state)) {
+    state.actionApproval.status = 'consumed';
+    reply = { status: 'unavailable' };
+  } else reply = approval.acceptReply(state.actionApproval, event.prompt);
   if (state.contract.mode !== 'change' || state.contract.dependencyPolicy !== 'ask' || state.contract.level !== 'guard') {
     state.actionApproval = null;
     if (reply) reply.status = 'unavailable';
@@ -472,10 +510,37 @@ function handlePrompt(event, state) {
   return repeatedContext ? none() : context(promptContext);
 }
 
+function handleScopedPrompt(event, options) {
+  const scope = approvalScope.resolve(event, options);
+  if (!scope.available) {
+    // A child prompt must never rewrite the parent contract when this runtime
+    // lacks the host's real child-state API. Contract changes fail closed;
+    // ordinary child conversation remains read-only.
+    const parent = readState(event.sessionId, options.dataDir);
+    const parsed = parseContractPrompt(event.prompt, parent.contract);
+    if (parsed.error) return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
+    if (parsed.directive || parsed.correction || /<send_user_message_question_reply>/.test(event.prompt)) {
+      return { kind: 'prompt-error', error: { code: 'CHILD_SCOPE_UNAVAILABLE' },
+        message: 'Stop That Shit: child-scoped policy and approval state are unavailable; no parent state was changed.' };
+    }
+    return none();
+  }
+  try {
+    return approvalScope.update(event, options, state => handlePrompt(event, state));
+  } catch {
+    return { kind: 'prompt-error', error: { code: 'CHILD_SCOPE_UNAVAILABLE' },
+      message: 'Stop That Shit: child-scoped policy state is unavailable; no parent state was changed.' };
+  }
+}
+
 function handleApprovalAction(event, options) {
+  const scope = approvalScope.resolve(event, options);
+  if (scope.child && !scope.available) {
+    return { kind: 'deny', message: 'Stop That Shit: child-scoped approval state is unavailable; action denied.' };
+  }
   let orphanedHandoff = null;
   try {
-    const result = withCoordinationLock(event.sessionId, options.dataDir, () => updateSession(event.sessionId, options.dataDir, state => {
+    const mutate = state => {
     if (state.storageError) return { kind: 'deny', message: state.storageError.message };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     const action = { ...event.action, duplicateActionId: summary.duplicateActionId };
@@ -492,7 +557,9 @@ function handleApprovalAction(event, options) {
     if (result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
         && state.contract.mode === 'change' && state.contract.level === 'guard' && approval.live(record)
         && ['approved', 'issued'].includes(record.status) && event.action.id !== record.deniedActionId
-        && approval.digest(event) === record.digest) {
+        && approval.digest(event) === record.digest
+        && (scope.child ? record.scopeAgentId === scope.agentId : record.scopeAgentId === undefined)
+        && approval.proposalStillAllowed(record, state.contract, state)) {
       const remaining = decide({ contract: state.contract, action: { ...action, dependencyIntent: false }, delegation: summary, state });
       if (remaining.outcome === 'allow') {
         const ticket = record.status === 'issued' ? record.ticket : crypto.randomBytes(32).toString('hex');
@@ -502,7 +569,8 @@ function handleApprovalAction(event, options) {
             runnerPath: path.join(__dirname, 'dependency-runner.cjs'),
             sessionId: event.sessionId,
             dataDir: dataRoot(options.dataDir),
-            ticket
+            ticket,
+            agentId: scope.child ? scope.agentId : null
           });
           const handoff = record.status === 'issued' ? record.handoff
             : createHandoff(bindingForRecord(event.sessionId, record, ticket));
@@ -537,23 +605,36 @@ function handleApprovalAction(event, options) {
       }
     }
     if (result.outcome === 'allow' && ['request_user_input_async', 'request_user_input'].includes(event.action.name)
-        && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })
-        && !approval.registerQuestion(record, event.action)) {
-      result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
-        explanation: 'The approval question is expired, already registered, or does not match the pending operation and an existing absolute directory.',
-        nextStep: 'Request a fresh approval for the specific operation; do not display an unbound card.' };
+        && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })) {
+      let registered = false;
+      const sameScope = scope.child ? record?.scopeAgentId === scope.agentId : record?.scopeAgentId === undefined;
+      if (sameScope && approval.proposalStillAllowed(record, state.contract, state)) {
+        const candidate = JSON.parse(JSON.stringify(record));
+        registered = approval.registerQuestion(candidate, event.action)
+          && approval.proposalStillAllowed(candidate, state.contract, state);
+        if (registered) Object.assign(record, candidate);
+      }
+      if (!registered) {
+        result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
+          explanation: 'The approval question is expired, already registered, no longer allowed by the current contract, or does not match the pending operation and an existing absolute directory.',
+          nextStep: 'Request a fresh approval for the specific operation; do not display an unbound card.' };
+      }
     }
     const denied = ['deny_and_explain', 'require_user_approval'].includes(result.outcome);
     const responseOutcome = denied ? options.denialResponseOutcome || 'permission_deny_returned'
       : result.outcome === 'report_and_defer' ? 'context_returned' : 'none';
-    const auditEvent = recordDecision({ sessionId: event.sessionId, action: event.action, contract: state.contract,
+    const auditEvent = recordDecision({ sessionId: event.sessionId, agent: event.agent,
+      action: event.action, contract: state.contract,
       delegation: state.delegation, decision: result, responseOutcome, approval: usedApproval }, options);
     let message;
     if (denied && result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
         && state.contract.mode === 'change' && state.contract.level === 'guard') {
       let pending = null;
       if (!approval.live(record) || record.status === 'consumed') {
-        pending = approval.newPending(event, auditEvent && auditEvent.eventId);
+        pending = approval.newPending(event, auditEvent && auditEvent.eventId, Date.now(), {
+          agentId: scope.child ? scope.agentId : null,
+          policyDigest: scope.child ? approvalScope.policyDigest(state.contract) : null
+        });
         if (pending) { state.actionApproval = pending; state.expiredApprovalEventId = null; }
       } else if (record.status === 'pending' && approval.digest(event) === record.digest) {
         pending = record;
@@ -572,7 +653,10 @@ function handleApprovalAction(event, options) {
     if (denied) return { kind: 'deny', decision: result, eventId: auditEvent && auditEvent.eventId, message };
     if (rewrittenCommand) return { kind: 'rewrite', command: rewrittenCommand };
     return responseOutcome === 'context_returned' ? context(message) : none();
-    }));
+    };
+    const result = scope.child
+      ? approvalScope.update(event, options, mutate)
+      : withCoordinationLock(event.sessionId, options.dataDir, () => updateSession(event.sessionId, options.dataDir, mutate));
     orphanedHandoff = null;
     return result;
   } catch {
@@ -588,11 +672,25 @@ function handleApprovalAction(event, options) {
 function handleBeforeAction(event, options) {
   if (!options.recoveryError && event.host?.family === 'codex'
       && (event.action.name === 'request_user_input_async' || event.action.dependencyIntent)) {
-    return handleApprovalAction(event, options);
+    const scope = approvalScope.resolve(event, options);
+    if (event.action.dependencyIntent && scope.child && !scope.available) {
+      // Without PR109's child-state APIs, retain the original generic decision
+      // path. It may report a watch/default observation or deny deps=ask, but
+      // must never inspect or mutate a parent's one-time approval record.
+    } else if (event.action.name === 'request_user_input_async' && scope.child && !scope.available) {
+      let snapshot = null;
+      try { snapshot = readState(event.sessionId, options.dataDir); } catch {}
+      const record = snapshot && (snapshot.actionApproval || { eventId: snapshot.expiredApprovalEventId });
+      if (approval.isProposalQuestion(event.action, record) || approval.isProposalQuestion(event.action, null)) {
+        return handleApprovalAction(event, options);
+      }
+      // An ordinary async clarification stays on the existing read-only path
+      // when this standalone runtime has no child ledger.
+    } else return handleApprovalAction(event, options);
   }
   if (!options.recoveryError && event.host?.family === 'codex' && event.action.name === 'request_user_input') {
     let snapshot = null;
-    try { snapshot = readState(event.sessionId, options.dataDir); } catch {}
+    try { snapshot = event.agent ? approvalScope.read(event, options) : readState(event.sessionId, options.dataDir); } catch {}
     const record = snapshot && (snapshot.actionApproval || { eventId: snapshot.expiredApprovalEventId });
     if (approval.isProposalQuestion(event.action, record) || approval.isProposalQuestion(event.action, null)) {
       return handleApprovalAction(event, options);
@@ -606,6 +704,10 @@ function handleBeforeAction(event, options) {
     ? (Number.isInteger(event.action.delegationCount) ? event.action.delegationCount : 1)
     : 0;
   const evaluate = (state) => {
+    const delegationLifecycleUnproven = Boolean(event.action.delegationLifecycleUnproven)
+      && !(event.action.delegationTargetId && targetIsActive(state.delegation, event.action.delegationTargetId));
+    const actionChangesDelegation = event.action.mutability === 'delegate'
+      || delegationLifecycleUnproven || legacyDelegationProtocol;
     const action = {
       mutability: event.action.mutability,
       analysisReason: event.action.analysisReason,
@@ -618,12 +720,12 @@ function handleBeforeAction(event, options) {
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
       unboundedDelegation: Boolean(event.action.unboundedDelegation),
-      delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
+      delegationLifecycleUnproven
     };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     action.duplicateActionId = summary.duplicateActionId;
     const result = decide({ contract: state.contract, action, delegation: summary, state });
-    if (changesDelegation && ['allow', 'report_and_defer'].includes(result.outcome)) {
+    if (actionChangesDelegation && ['allow', 'report_and_defer'].includes(result.outcome)) {
       state.delegation = applyDelegationFact(state.delegation, {
         kind: 'accepted', id: event.action.id || 'legacy:unidentified', count: delegationCount,
         completionScope: event.action.completionScope,
@@ -631,7 +733,7 @@ function handleBeforeAction(event, options) {
           : action.unboundedDelegation ? 'unbounded_execution'
           : action.delegationLifecycleUnproven ? 'unversioned_resume' : null
       });
-    } else if (changesDelegation && summary.duplicateActionId) {
+    } else if (actionChangesDelegation && summary.duplicateActionId) {
       // A later not-started event may describe this rejected attempt, not the
       // original pending execution that still owns the reservation.
       state.delegation = applyDelegationFact(state.delegation, { kind: 'duplicate_rejected', id: event.action.id });
@@ -642,11 +744,27 @@ function handleBeforeAction(event, options) {
   // Separate host processes can issue independent agent launches close together.
   // Serialize delegation reservations across Hook processes. Prompt updates
   // and completion handlers use the same lock; pure reads stay unlocked.
-  const { state, result } = options.recoveryError
-    ? evaluate(recoveryState(options.recoveryError))
-    : changesDelegation
-      ? coordinatedUpdate(event, options, evaluate)
-      : evaluate(readState(event.sessionId, options.dataDir));
+  let evaluated;
+  if (options.recoveryError) evaluated = evaluate(recoveryState(options.recoveryError));
+  else if (event.agent) {
+    const scoped = approvalScope.resolve(event, options);
+    if (!scoped.available) {
+      // Keep the standalone PR120 behavior for non-approval child tools when
+      // PR109's scoped-state APIs are absent. Preserve PR120's shared
+      // delegation budget and serialize reservations, but don't write a child
+      // contract or approval record into the parent ledger.
+      evaluated = changesDelegation
+        ? coordinatedUpdate(event, options, evaluate)
+        : evaluate(readState(event.sessionId, options.dataDir));
+    } else if (changesDelegation) evaluated = approvalScope.update(event, options, evaluate);
+    else {
+      const state = approvalScope.read(event, options);
+      if (state.storageError) return { kind: 'deny', message: 'Stop That Shit: child-scoped policy state is unavailable; action denied.' };
+      evaluated = evaluate(state);
+    }
+  } else if (changesDelegation) evaluated = coordinatedUpdate(event, options, evaluate);
+  else evaluated = evaluate(readState(event.sessionId, options.dataDir));
+  const { state, result } = evaluated;
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
   const responseOutcome = denied
@@ -654,6 +772,7 @@ function handleBeforeAction(event, options) {
     : result.outcome === 'report_and_defer' ? 'context_returned' : 'none';
   const auditEvent = recordDecision({
     sessionId: event.sessionId,
+    agent: event.agent,
     action: { ...event.action, delegationCount },
     contract: state.contract,
     delegation: state.delegation,
@@ -673,29 +792,45 @@ function handleBeforeAction(event, options) {
 function handleAfterAction(event, options) {
   if (event.action?.name === 'request_user_input') {
     if (event.host?.family !== 'codex') return none();
+    const scope = approvalScope.resolve(event, options);
+    if (scope.child && !scope.available) return none();
     try {
-      const snapshot = readState(event.sessionId, options.dataDir);
+      const snapshot = scope.child ? approvalScope.read(event, options) : readState(event.sessionId, options.dataDir);
+      const scopeMatches = record => scope.child
+        ? record?.scopeAgentId === scope.agentId
+        : record?.scopeAgentId === undefined;
       if (event.action.unanswered === true) {
-        if (snapshot.storageError || !approval.nativeQuestionMatches(snapshot.actionApproval, event.action)) return none();
-        return coordinatedUpdate(event, options, state => {
-          if (!state.storageError && approval.nativeQuestionMatches(state.actionApproval, event.action)) {
+        if (snapshot.storageError || !scopeMatches(snapshot.actionApproval)
+            || !approval.nativeQuestionMatches(snapshot.actionApproval, event.action)) return none();
+        const update = (state) => {
+          if (!state.storageError && scopeMatches(state.actionApproval)
+              && approval.nativeQuestionMatches(state.actionApproval, event.action)) {
             state.actionApproval = null;
           }
           return none();
-        });
+        };
+        return scope.child ? approvalScope.update(event, options, update)
+          : coordinatedUpdate(event, options, update);
       }
-      if (snapshot.storageError || !approval.nativeAnswerMatches(snapshot.actionApproval, event.action)) return none();
-      return coordinatedUpdate(event, options, state => {
-        if (!state.storageError) approval.acceptNativeAnswer(state.actionApproval, event.action);
+      if (snapshot.storageError || !scopeMatches(snapshot.actionApproval)
+          || !approval.proposalStillAllowed(snapshot.actionApproval, snapshot.contract, snapshot)
+          || !approval.nativeAnswerMatches(snapshot.actionApproval, event.action)) return none();
+      const update = (state) => {
+        if (!state.storageError && scopeMatches(state.actionApproval)
+            && approval.proposalStillAllowed(state.actionApproval, state.contract, state)) {
+          approval.acceptNativeAnswer(state.actionApproval, event.action);
+        }
         return none();
-      });
+      };
+      return scope.child ? approvalScope.update(event, options, update)
+        : coordinatedUpdate(event, options, update);
     } catch {
       // An unavailable approval ledger leaves the proposal unapproved.
       return none();
     }
   }
   if (!supportsLifecycleFacts(event)) return none();
-  return coordinatedUpdate(event, options, (state) => {
+  const update = (state) => {
     // Only a declared facts adapter may report binding or completion. A false
     // async flag can be a request parameter and never proves children joined.
     const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
@@ -707,7 +842,10 @@ function handleAfterAction(event, options) {
       state.delegation = applyDelegationFact(state.delegation, { kind: 'child_stopped', agentId });
     }
     return none();
-  });
+  };
+  const scope = approvalScope.resolve(event, options);
+  if (scope.child && scope.available) return approvalScope.update(event, options, update);
+  return coordinatedUpdate(event, options, update);
 }
 
 function handleLifecycleContext(event, options) {
@@ -738,9 +876,15 @@ function handleControlEvent(rawEvent, options = {}) {
   switch (event.kind) {
     case 'prompt.submit': {
       const command = runtimeCommand(event.prompt);
-      return command
-        ? handleRuntimeCommand(command, event, readState(event.sessionId, options.dataDir), options)
-        : coordinatedUpdate(event, options, state => handlePrompt(event, state));
+      if (command) {
+        const scope = approvalScope.resolve(event, options);
+        const state = scope.child && scope.available
+          ? approvalScope.read(event, options) : readState(event.sessionId, options.dataDir);
+        return handleRuntimeCommand(command, event, state, options);
+      }
+      return event.agent
+          ? handleScopedPrompt(event, options)
+          : coordinatedUpdate(event, options, state => handlePrompt(event, state));
     }
     case 'action.before':
       return handleBeforeAction(event, options);
@@ -2355,6 +2499,8 @@ const path = require('node:path');
 const { directDependencyArguments } = __require("src/shell-analysis.cjs");
 const { resolveManager } = __require("src/dependency-manager.cjs");
 const { validMetadata } = __require("src/dependency-handoff.cjs");
+const { decide } = __require("src/decision.cjs");
+const { inspectDelegation } = __require("src/delegation-state.cjs");
 
 const PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
 const PERMIT_TTL_MS = 10 * 60 * 1000;
@@ -2377,11 +2523,13 @@ function digest(event) {
       || !action.id || Buffer.byteLength(action.id, 'utf8') > 256
       || !action.cwd || !action.input || typeof action.input.command !== 'string') return null;
   if (!directDependencyArguments(action.input.command) || /[\r\n]/.test(action.input.command)) return null;
-  const bound = stable({ session: event.sessionId, tool: action.name, input: action.input, cwd: action.cwd });
-  return crypto.createHash('sha256').update(JSON.stringify(bound)).digest('hex');
+  const bound = { session: event.sessionId, tool: action.name, input: action.input, cwd: action.cwd };
+  if (event.agent?.agentId) bound.agentId = event.agent.agentId;
+  const canonicalBound = stable(bound);
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalBound)).digest('hex');
 }
 
-function newPending(event, eventId, now = Date.now()) {
+function newPending(event, eventId, now = Date.now(), scope = {}) {
   const actionDigest = digest(event);
   if (!actionDigest || !eventId) return null;
   const argv = directDependencyArguments(event.action.input.command);
@@ -2393,8 +2541,26 @@ function newPending(event, eventId, now = Date.now()) {
   const proposalExpires = now + PROPOSAL_TTL_MS;
   const questionPrefix = `${PROPOSAL_PREFIX}. Reply by ${new Date(proposalExpires).toISOString()}; if allowed, run once within 10 minutes after your reply: ${JSON.stringify(argv)} using ${JSON.stringify(manager.launchPath || manager.entry.path)} (${eventId}) in directory: `;
   if (Buffer.byteLength(questionPrefix, 'utf8') > 8192) return null;
-  return { digest: actionDigest, eventId, questionPrefix, argv, manager,
+  const record = { digest: actionDigest, eventId, questionPrefix, argv, manager,
     deniedActionId: event.action.id, expires: proposalExpires, proposalExpires, status: 'pending' };
+  record.proposedAction = {
+    mutability: event.action.mutability || 'unknown',
+    analysisReason: event.action.analysisReason || null,
+    hashIntent: Boolean(event.action.hashIntent),
+    reachability: event.action.reachability || null,
+    authorization: event.action.authorization || null,
+    affectedPaths: Array.isArray(event.action.affectedPaths) ? event.action.affectedPaths.slice(0, 128) : [],
+    cwd: event.action.cwd,
+    unboundedDelegation: Boolean(event.action.unboundedDelegation),
+    delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
+  };
+  if (scope.agentId) {
+    if (typeof scope.agentId !== 'string' || !scope.agentId.trim() || Buffer.byteLength(scope.agentId, 'utf8') > 4096
+        || !/^[a-f0-9]{64}$/.test(scope.policyDigest || '')) return null;
+    record.scopeAgentId = scope.agentId;
+    record.policyDigest = scope.policyDigest;
+  }
+  return record;
 }
 
 function live(record, now = Date.now()) {
@@ -2407,6 +2573,8 @@ function live(record, now = Date.now()) {
     && record.manager.entry && typeof record.manager.entry.path === 'string'
     && (record.manager.kind !== 'node' || record.manager.executable && typeof record.manager.executable.path === 'string')
     && (record.status === 'pending' || typeof record.question === 'string' && Buffer.byteLength(record.question, 'utf8') <= 8192)
+    && (record.status === 'issued' ? validDecisionAction(record.approvedAction)
+      : record.proposedAction === undefined || validDecisionAction(record.proposedAction))
     && typeof record.deniedActionId === 'string' && record.deniedActionId.length > 0
     && (record.status === 'pending' || typeof record.questionId === 'string'
       && typeof record.questionCallId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(record.questionCallId))
@@ -2416,9 +2584,38 @@ function live(record, now = Date.now()) {
       && /^[a-f0-9]{64}$/.test(record.syncQuestionDigest || '')
       && typeof record.syncRegistrationCwd === 'string' && path.isAbsolute(record.syncRegistrationCwd))
     && Number.isSafeInteger(record.proposalExpires) && Number.isSafeInteger(record.expires)
+    && (record.scopeAgentId === undefined || typeof record.scopeAgentId === 'string'
+      && record.scopeAgentId.trim() && Buffer.byteLength(record.scopeAgentId, 'utf8') <= 4096
+      && /^[a-f0-9]{64}$/.test(record.policyDigest || ''))
     && (['pending', 'question'].includes(record.status) ? record.proposalExpires : record.expires) > now
     && ['pending', 'question', 'approved', 'issued', 'consumed'].includes(record.status)
     && (record.status !== 'issued' || validMetadata(record.handoff));
+}
+
+function validDecisionAction(action) {
+  return action && typeof action === 'object' && !Array.isArray(action)
+    && ['read', 'write', 'delegate', 'control', 'unknown'].includes(action.mutability)
+    && (action.analysisReason === undefined || action.analysisReason === null || typeof action.analysisReason === 'string')
+    && typeof action.hashIntent === 'boolean'
+    && (action.reachability === undefined || action.reachability === null || ['reachable', 'unreachable'].includes(action.reachability))
+    && (action.authorization === undefined || action.authorization === null || typeof action.authorization === 'string')
+    && Array.isArray(action.affectedPaths) && action.affectedPaths.length <= 128
+    && action.affectedPaths.every(value => typeof value === 'string' && value.length <= 8192)
+    && typeof action.cwd === 'string' && path.isAbsolute(action.cwd)
+    && (action.unboundedDelegation === undefined || typeof action.unboundedDelegation === 'boolean')
+    && (action.delegationLifecycleUnproven === undefined || typeof action.delegationLifecycleUnproven === 'boolean');
+}
+
+function proposalStillAllowed(record, contract, state = {}) {
+  if (!live(record) || contract?.mode !== 'change' || contract?.level !== 'guard'
+      || contract?.dependencyPolicy !== 'ask') return false;
+  const saved = record.status === 'issued' ? record.approvedAction : record.proposedAction;
+  if (!validDecisionAction(saved)) return saved === undefined;
+  const action = { ...saved, cwd: record.targetCwd || saved.cwd, dependencyIntent: false };
+  try {
+    const result = decide({ contract, action, state, delegation: inspectDelegation(state.delegation) });
+    return result.outcome === 'allow';
+  } catch { return false; }
 }
 
 function isProposalQuestion(action, record) {
@@ -2575,7 +2772,7 @@ function acceptNativeAnswer(record, action, now = Date.now()) {
   return { status: 'denied', eventId: record.eventId };
 }
 
-module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeQuestionMatches, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, proposalStillAllowed, isProposalQuestion, isSyncQuestion, syncQuestionDigest, registerQuestion, acceptReply, nativeQuestionMatches, nativeAnswerMatches, acceptNativeAnswer, hostQuestionText };
 
 },
 "src/shell-analysis.cjs": function(module, exports, __require) {
@@ -2968,12 +3165,15 @@ function bindingPayload(binding) {
       || !/^evt_[0-9a-f-]{36}$/.test(binding.eventId || '')
       || !/^[a-f0-9]{64}$/.test(binding.ticket || '')
       || !/^[a-f0-9]{64}$/.test(binding.actionDigest || '')
+      || binding.agentId !== undefined && binding.agentId !== null
+        && (typeof binding.agentId !== 'string' || !binding.agentId.trim() || Buffer.byteLength(binding.agentId, 'utf8') > 4096)
+      || binding.policyDigest !== undefined && binding.policyDigest !== null && !/^[a-f0-9]{64}$/.test(binding.policyDigest)
       || typeof binding.targetCwd !== 'string' || !path.isAbsolute(binding.targetCwd)
       || !Array.isArray(binding.argv) || !binding.argv.every(value => typeof value === 'string')
       || !binding.manager || typeof binding.manager !== 'object' || Array.isArray(binding.manager)) {
     throw new Error('Invalid one-time handoff binding');
   }
-  return Buffer.from(JSON.stringify(canonical({
+  const payload = {
     version: 1,
     sessionId: binding.sessionId,
     eventId: binding.eventId,
@@ -2982,7 +3182,10 @@ function bindingPayload(binding) {
     argv: binding.argv,
     targetCwd: binding.targetCwd,
     manager: binding.manager
-  })), 'utf8');
+  };
+  if (binding.agentId) payload.agentId = binding.agentId;
+  if (binding.policyDigest) payload.policyDigest = binding.policyDigest;
+  return Buffer.from(JSON.stringify(canonical(payload)), 'utf8');
 }
 
 function fileIdentity(stat) {
@@ -3207,7 +3410,8 @@ function discardHandoff(handoff) {
 
 function bindingForRecord(sessionId, record, ticket = record?.ticket) {
   if (!record || typeof record !== 'object') throw new Error('Approval record is unavailable');
-  return { sessionId, eventId: record.eventId, ticket, actionDigest: record.digest,
+  return { sessionId, agentId: record.scopeAgentId || null, policyDigest: record.policyDigest || null,
+    eventId: record.eventId, ticket, actionDigest: record.digest,
     argv: record.argv, targetCwd: record.targetCwd, manager: record.manager };
 }
 
@@ -3245,6 +3449,113 @@ function cleanupCreatedHandoffs() {
 
 module.exports = { bindingForRecord, createHandoff, consumeHandoff, discardHandoff, handoffAvailable,
   validMetadata, withCoordinationLock, cleanupCreatedHandoffs };
+
+},
+"src/approval-scope.cjs": function(module, exports, __require) {
+'use strict';
+
+const path = require('node:path');
+const stateStore = __require("src/state.cjs");
+const contracts = __require("src/contracts.cjs");
+
+function agentIdFor(event) {
+  const value = event && event.agent && event.agent.agentId;
+  return typeof value === 'string' && value.trim() && Buffer.byteLength(value, 'utf8') <= 4096 ? value : null;
+}
+
+function scopedCapability(sessionId, agentId, dataDir) {
+  if (typeof stateStore.childStatePath !== 'function' || typeof contracts.narrowContract !== 'function') return null;
+  try {
+    const childPath = stateStore.childStatePath(sessionId, agentId, dataDir);
+    const parentPath = stateStore.statePath(sessionId, dataDir);
+    return typeof childPath === 'string' && typeof parentPath === 'string'
+      && path.resolve(childPath) !== path.resolve(parentPath) ? childPath : null;
+  } catch { return null; }
+}
+
+function resolve(event, options) {
+  if (!event || event.agent === undefined || event.agent === null) return { child: false, available: true, agentId: null };
+  const agentId = agentIdFor(event);
+  if (!agentId) return { child: true, available: false, agentId: null };
+  const childPath = scopedCapability(event.sessionId, agentId, options.dataDir);
+  return { child: true, available: Boolean(childPath), agentId, childPath };
+}
+
+function effectiveChildContract(parentContract, childContract) {
+  // A new child ledger has only the schema's default, not an independent
+  // contract. Until the child submits one, inherit the current parent policy
+  // for evaluation without persisting that effective value into child state.
+  const uninitialized = isUninitializedChildContract(childContract);
+  if (uninitialized) return contracts.narrowContract(parentContract, parentContract);
+  const scoped = childContract && childContract.mode === 'unconfirmed'
+    ? { ...childContract, mode: parentContract.mode } : childContract;
+  return contracts.narrowContract(parentContract, scoped);
+}
+
+function isUninitializedChildContract(childContract) {
+  return Boolean(childContract && childContract.source === 'default' && childContract.mode === 'unconfirmed');
+}
+
+function read(event, options) {
+  const scope = resolve(event, options);
+  if (!scope.child) {
+    const state = stateStore.readState(event.sessionId, options.dataDir);
+    return { ...state, scope, childContract: state.contract, effectiveContract: state.contract };
+  }
+  if (!scope.available) return { scope, storageError: { code: 'CHILD_SCOPE_UNAVAILABLE', message: 'Child-scoped policy state is unavailable.' } };
+  const parent = stateStore.readState(event.sessionId, options.dataDir);
+  const child = stateStore.readState(event.sessionId, options.dataDir, { agentId: scope.agentId });
+  if (parent.storageError || child.storageError) return { ...child, scope, storageError: parent.storageError || child.storageError };
+  let effectiveContract;
+  try { effectiveContract = effectiveChildContract(parent.contract, child.contract); }
+  catch { return { ...child, scope, storageError: { code: 'CHILD_SCOPE_UNAVAILABLE', message: 'Child-scoped policy state is unavailable.' } }; }
+  return { ...child, scope, parentContract: parent.contract, childContract: child.contract, effectiveContract, contract: effectiveContract };
+}
+
+function update(event, options, callback) {
+  const scope = resolve(event, options);
+  if (!scope.child) return stateStore.updateSession(event.sessionId, options.dataDir, callback);
+  if (!scope.available) throw new Error('Child-scoped policy state is unavailable.');
+  const { withCoordinationLock } = __require("src/dependency-handoff.cjs");
+  return withCoordinationLock(event.sessionId, options.dataDir, () => {
+    const parent = stateStore.readState(event.sessionId, options.dataDir);
+    if (parent.storageError) throw new Error('Parent policy state is unavailable.');
+    return stateStore.updateSession(event.sessionId, options.dataDir, child => {
+      const scoped = read(event, options);
+      if (scoped.storageError) throw new Error('Child policy state is unavailable.');
+      scoped.actionApproval = child.actionApproval;
+      scoped.expiredApprovalEventId = child.expiredApprovalEventId;
+      scoped.delegation = child.delegation;
+      const result = callback(scoped, scoped.effectiveContract);
+      child.actionApproval = scoped.actionApproval;
+      child.expiredApprovalEventId = scoped.expiredApprovalEventId;
+      child.delegation = scoped.delegation;
+      child.directiveWarning = scoped.directiveWarning;
+      child.directiveError = scoped.directiveError;
+      child.lastPromptContext = scoped.lastPromptContext;
+      // Contract mutation is intentionally handled by the child prompt path,
+      // which parses against childContract and writes that explicit contract.
+      if (scoped.childContract !== undefined) child.contract = scoped.childContract;
+      return result;
+    }, { agentId: scope.agentId });
+  });
+}
+
+function policyDigest(contract) {
+  if (!contract || typeof contract !== 'object') return null;
+  const bound = {
+    mode: contract.mode,
+    level: contract.level,
+    hashPolicy: contract.hashPolicy,
+    dependencyPolicy: contract.dependencyPolicy,
+    allowedPaths: contract.allowedPaths === null ? null : Array.isArray(contract.allowedPaths) ? [...contract.allowedPaths].sort() : undefined
+  };
+  if (Object.values(bound).some(value => value === undefined)) return null;
+  const crypto = require('node:crypto');
+  return crypto.createHash('sha256').update(JSON.stringify(bound)).digest('hex');
+}
+
+module.exports = { agentIdFor, resolve, read, update, policyDigest, effectiveChildContract, isUninitializedChildContract };
 
 },
 "src/runner-command.cjs": function(module, exports, __require) {
@@ -3330,9 +3641,9 @@ function resolveWindowsPowerShell({ systemRoot = process.env.SystemRoot || proce
   return short;
 }
 
-function buildRunnerCommand({ executable, runnerPath, sessionId, dataDir, ticket, platform = process.platform, windowsPowerShellPath } = {}) {
-  const bootstrap = "require(Buffer.from(process.argv[1],'base64').toString('utf8')).run(Buffer.from(process.argv[2],'base64').toString('utf8'),Buffer.from(process.argv[3],'base64').toString('utf8'),process.argv[4])";
-  const args = [executable, '-e', bootstrap, encode(runnerPath), encode(sessionId), encode(dataDir), ticket];
+function buildRunnerCommand({ executable, runnerPath, sessionId, dataDir, ticket, agentId, platform = process.platform, windowsPowerShellPath } = {}) {
+  const bootstrap = "require(Buffer.from(process.argv[1],'base64').toString('utf8')).run(Buffer.from(process.argv[2],'base64').toString('utf8'),Buffer.from(process.argv[3],'base64').toString('utf8'),process.argv[4],Buffer.from(process.argv[5]||'','base64').toString('utf8'))";
+  const args = [executable, '-e', bootstrap, encode(runnerPath), encode(sessionId), encode(dataDir), ticket, encode(agentId || '')];
 
   if (platform === 'win32') {
     const script = `& ${args.map(quotePowerShell).join(' ')}; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE`;
@@ -3356,19 +3667,38 @@ module.exports = { buildRunnerCommand, isShellNeutralWindowsPath, resolveWindows
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const { readState } = __require("src/state.cjs");
-const { live } = __require("src/action-approval.cjs");
+const { live, proposalStillAllowed } = __require("src/action-approval.cjs");
 const { bindingForRecord, consumeHandoff, withCoordinationLock } = __require("src/dependency-handoff.cjs");
 const { unchanged } = __require("src/dependency-manager.cjs");
 const { decide } = __require("src/decision.cjs");
 const { inspectDelegation } = __require("src/delegation-state.cjs");
+const approvalScope = __require("src/approval-scope.cjs");
 
-function claim(sessionId, dataDir, ticket) {
+function claim(sessionId, dataDir, ticket, agentId = '') {
   return withCoordinationLock(sessionId, dataDir, () => {
-    const state = readState(sessionId, dataDir);
+    let state;
+    let contract;
+    if (agentId) {
+      const store = __require("src/state.cjs");
+      const contracts = __require("src/contracts.cjs");
+      if (typeof store.childStatePath !== 'function' || typeof contracts.narrowContract !== 'function'
+          || store.childStatePath(sessionId, agentId, dataDir) === store.statePath(sessionId, dataDir)) {
+        throw new Error('Child-scoped approval is unavailable');
+      }
+      const parent = readState(sessionId, dataDir);
+      state = readState(sessionId, dataDir, { agentId });
+      if (parent.storageError || state.storageError) throw new Error('Approval policy state is unavailable');
+      contract = approvalScope.effectiveChildContract(parent.contract, state.contract);
+    } else {
+      state = readState(sessionId, dataDir);
+      contract = state.contract;
+    }
     const record = state.actionApproval;
     if (state.storageError || !live(record) || record.status !== 'issued' || record.ticket !== ticket
-        || state.contract.mode !== 'change' || state.contract.level !== 'guard'
-        || state.contract.dependencyPolicy !== 'ask') throw new Error('Approval is unavailable or expired');
+        || (agentId ? record.scopeAgentId !== agentId : record.scopeAgentId !== undefined)
+        || contract.mode !== 'change' || contract.level !== 'guard'
+        || contract.dependencyPolicy !== 'ask'
+        || !proposalStillAllowed(record, contract, state)) throw new Error('Approval is unavailable or expired');
     if (!record.requestedCwd || !record.targetCwd || fs.realpathSync(record.requestedCwd) !== record.targetCwd
         || fs.realpathSync(record.targetCwd) !== record.targetCwd || !fs.statSync(record.targetCwd).isDirectory()) throw new Error('Approved directory changed');
     if (!unchanged(record.manager.entry)
@@ -3376,16 +3706,19 @@ function claim(sessionId, dataDir, ticket) {
         || record.manager.kind === 'node' && !unchanged(record.manager.executable)) throw new Error('Approved package manager changed');
     if (!record.approvedAction || typeof record.approvedAction !== 'object') throw new Error('Approved action facts unavailable');
     const action = { ...record.approvedAction, cwd: record.targetCwd, dependencyIntent: false };
-    const decision = decide({ contract: state.contract, action, delegation: inspectDelegation(state.delegation), state });
+    const decision = decide({ contract, action, delegation: inspectDelegation(state.delegation), state });
     if (decision.outcome !== 'allow') throw new Error(`Approved operation no longer satisfies current policy: ${decision.reasonCode}`);
     consumeHandoff(record.handoff, bindingForRecord(sessionId, record, ticket));
     return { cwd: record.targetCwd, manager: record.manager, args: record.argv.slice(1) };
   });
 }
 
-function main(sessionId, dataDir, ticket) {
+function main(sessionId, dataDir, ticket, agentId = '') {
   if (!sessionId || !dataDir || !/^[a-f0-9]{64}$/.test(ticket || '')) throw new Error('Invalid approval ticket');
-  const operation = claim(sessionId, dataDir, ticket);
+  if (agentId && (typeof agentId !== 'string' || !agentId.trim() || Buffer.byteLength(agentId, 'utf8') > 4096)) {
+    throw new Error('Invalid approval scope');
+  }
+  const operation = claim(sessionId, dataDir, ticket, agentId);
   const executable = operation.manager.kind === 'node' ? operation.manager.executable.path : operation.manager.launchPath;
   const args = operation.manager.kind === 'node' ? [operation.manager.entry.path, ...operation.args] : operation.args;
   const child = spawn(executable, args, { cwd: operation.cwd, shell: false, stdio: 'inherit' });
@@ -3406,8 +3739,8 @@ function main(sessionId, dataDir, ticket) {
   });
 }
 
-async function run(sessionId, dataDir, ticket) {
-  try { process.exitCode = await main(sessionId, dataDir, ticket); }
+async function run(sessionId, dataDir, ticket, agentId = '') {
+  try { process.exitCode = await main(sessionId, dataDir, ticket, agentId); }
   catch (error) { process.stderr.write(`Stop That Shit: controlled dependency operation failed: ${error.message}\n`); process.exitCode = 1; }
 }
 

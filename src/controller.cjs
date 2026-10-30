@@ -2,7 +2,8 @@
 
 const { DEFAULT_AGENT_LIMIT, parseContractPrompt } = require('./contracts.cjs');
 const { SHELL_ANALYSIS_REASONS, isShellAnalysisReason, assertControlEvent, supportsLifecycleFacts } = require('./control-protocol.cjs');
-const { inspectDelegation, applyDelegationFact } = require('./delegation-state.cjs');
+const delegationState = require('./delegation-state.cjs');
+const { inspectDelegation, applyDelegationFact } = delegationState;
 const { decide } = require('./decision.cjs');
 const { readRuntime, recordDecision } = require('./runtime-audit.cjs');
 const { recordAnnotation } = require('./runtime-annotations.cjs');
@@ -10,6 +11,7 @@ const { readState, recoveryState, updateSession, dataRoot } = require('./state.c
 const path = require('node:path');
 const crypto = require('node:crypto');
 const approval = require('./action-approval.cjs');
+const approvalScope = require('./approval-scope.cjs');
 const { buildRunnerCommand } = require('./runner-command.cjs');
 const { bindingForRecord, createHandoff, handoffAvailable, withCoordinationLock } = require('./dependency-handoff.cjs');
 // Keep the executable helper in the hook's statically discoverable dependency graph.
@@ -17,6 +19,13 @@ require('./dependency-runner.cjs');
 
 function none() {
   return { kind: 'none' };
+}
+
+function targetIsActive(state, agentId) {
+  // PR109 adds authoritative target resolution. Without that API, retain the
+  // existing conservative lifecycle decision instead of guessing from names.
+  return typeof delegationState.isActiveAgent === 'function'
+    && delegationState.isActiveAgent(state, agentId);
 }
 
 function context(text) {
@@ -163,15 +172,30 @@ function handleRuntimeCommand(command, event, state, options) {
 
 function handlePrompt(event, state) {
   if (state.storageError) return context(`${state.storageError.code}: ${state.storageError.message}`);
-  const parsed = parseContractPrompt(event.prompt, state.contract);
+  const previousContract = state.scope?.child
+    ? approvalScope.isUninitializedChildContract(state.childContract) ? state.parentContract : state.childContract
+    : state.contract;
+  const parsed = parseContractPrompt(event.prompt, previousContract);
   if (parsed.error) {
     state.directiveError = parsed.error;
     state.directiveWarning = null;
     state.lastPromptContext = null;
     return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
   }
-  state.contract = parsed.contract;
-  const reply = approval.acceptReply(state.actionApproval, event.prompt);
+  if (state.scope?.child) {
+    if (parsed.directive || parsed.correction) state.childContract = parsed.contract;
+    state.contract = approvalScope.effectiveChildContract(state.parentContract, state.childContract);
+  } else state.contract = parsed.contract;
+  let reply;
+  const replyEnvelope = /^\s*<send_user_message_question_reply>[\s\S]*<\/send_user_message_question_reply>\s*$/.test(event.prompt);
+  if (replyEnvelope && state.scope?.child && state.actionApproval
+      && state.actionApproval.scopeAgentId !== state.scope.agentId) {
+    reply = { status: 'unavailable' };
+  } else if (replyEnvelope && state.actionApproval
+      && !approval.proposalStillAllowed(state.actionApproval, state.contract, state)) {
+    state.actionApproval.status = 'consumed';
+    reply = { status: 'unavailable' };
+  } else reply = approval.acceptReply(state.actionApproval, event.prompt);
   if (state.contract.mode !== 'change' || state.contract.dependencyPolicy !== 'ask' || state.contract.level !== 'guard') {
     state.actionApproval = null;
     if (reply) reply.status = 'unavailable';
@@ -193,10 +217,37 @@ function handlePrompt(event, state) {
   return repeatedContext ? none() : context(promptContext);
 }
 
+function handleScopedPrompt(event, options) {
+  const scope = approvalScope.resolve(event, options);
+  if (!scope.available) {
+    // A child prompt must never rewrite the parent contract when this runtime
+    // lacks the host's real child-state API. Contract changes fail closed;
+    // ordinary child conversation remains read-only.
+    const parent = readState(event.sessionId, options.dataDir);
+    const parsed = parseContractPrompt(event.prompt, parent.contract);
+    if (parsed.error) return { kind: 'prompt-error', error: parsed.error, message: parsed.error.message };
+    if (parsed.directive || parsed.correction || /<send_user_message_question_reply>/.test(event.prompt)) {
+      return { kind: 'prompt-error', error: { code: 'CHILD_SCOPE_UNAVAILABLE' },
+        message: 'Stop That Shit: child-scoped policy and approval state are unavailable; no parent state was changed.' };
+    }
+    return none();
+  }
+  try {
+    return approvalScope.update(event, options, state => handlePrompt(event, state));
+  } catch {
+    return { kind: 'prompt-error', error: { code: 'CHILD_SCOPE_UNAVAILABLE' },
+      message: 'Stop That Shit: child-scoped policy state is unavailable; no parent state was changed.' };
+  }
+}
+
 function handleApprovalAction(event, options) {
+  const scope = approvalScope.resolve(event, options);
+  if (scope.child && !scope.available) {
+    return { kind: 'deny', message: 'Stop That Shit: child-scoped approval state is unavailable; action denied.' };
+  }
   let orphanedHandoff = null;
   try {
-    const result = withCoordinationLock(event.sessionId, options.dataDir, () => updateSession(event.sessionId, options.dataDir, state => {
+    const mutate = state => {
     if (state.storageError) return { kind: 'deny', message: state.storageError.message };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     const action = { ...event.action, duplicateActionId: summary.duplicateActionId };
@@ -213,7 +264,9 @@ function handleApprovalAction(event, options) {
     if (result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
         && state.contract.mode === 'change' && state.contract.level === 'guard' && approval.live(record)
         && ['approved', 'issued'].includes(record.status) && event.action.id !== record.deniedActionId
-        && approval.digest(event) === record.digest) {
+        && approval.digest(event) === record.digest
+        && (scope.child ? record.scopeAgentId === scope.agentId : record.scopeAgentId === undefined)
+        && approval.proposalStillAllowed(record, state.contract, state)) {
       const remaining = decide({ contract: state.contract, action: { ...action, dependencyIntent: false }, delegation: summary, state });
       if (remaining.outcome === 'allow') {
         const ticket = record.status === 'issued' ? record.ticket : crypto.randomBytes(32).toString('hex');
@@ -223,7 +276,8 @@ function handleApprovalAction(event, options) {
             runnerPath: path.join(__dirname, 'dependency-runner.cjs'),
             sessionId: event.sessionId,
             dataDir: dataRoot(options.dataDir),
-            ticket
+            ticket,
+            agentId: scope.child ? scope.agentId : null
           });
           const handoff = record.status === 'issued' ? record.handoff
             : createHandoff(bindingForRecord(event.sessionId, record, ticket));
@@ -258,23 +312,36 @@ function handleApprovalAction(event, options) {
       }
     }
     if (result.outcome === 'allow' && ['request_user_input_async', 'request_user_input'].includes(event.action.name)
-        && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })
-        && !approval.registerQuestion(record, event.action)) {
-      result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
-        explanation: 'The approval question is expired, already registered, or does not match the pending operation and an existing absolute directory.',
-        nextStep: 'Request a fresh approval for the specific operation; do not display an unbound card.' };
+        && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })) {
+      let registered = false;
+      const sameScope = scope.child ? record?.scopeAgentId === scope.agentId : record?.scopeAgentId === undefined;
+      if (sameScope && approval.proposalStillAllowed(record, state.contract, state)) {
+        const candidate = JSON.parse(JSON.stringify(record));
+        registered = approval.registerQuestion(candidate, event.action)
+          && approval.proposalStillAllowed(candidate, state.contract, state);
+        if (registered) Object.assign(record, candidate);
+      }
+      if (!registered) {
+        result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
+          explanation: 'The approval question is expired, already registered, no longer allowed by the current contract, or does not match the pending operation and an existing absolute directory.',
+          nextStep: 'Request a fresh approval for the specific operation; do not display an unbound card.' };
+      }
     }
     const denied = ['deny_and_explain', 'require_user_approval'].includes(result.outcome);
     const responseOutcome = denied ? options.denialResponseOutcome || 'permission_deny_returned'
       : result.outcome === 'report_and_defer' ? 'context_returned' : 'none';
-    const auditEvent = recordDecision({ sessionId: event.sessionId, action: event.action, contract: state.contract,
+    const auditEvent = recordDecision({ sessionId: event.sessionId, agent: event.agent,
+      action: event.action, contract: state.contract,
       delegation: state.delegation, decision: result, responseOutcome, approval: usedApproval }, options);
     let message;
     if (denied && result.reasonCode === 'DEPENDENCY_NOT_AUTHORIZED' && state.contract.dependencyPolicy === 'ask'
         && state.contract.mode === 'change' && state.contract.level === 'guard') {
       let pending = null;
       if (!approval.live(record) || record.status === 'consumed') {
-        pending = approval.newPending(event, auditEvent && auditEvent.eventId);
+        pending = approval.newPending(event, auditEvent && auditEvent.eventId, Date.now(), {
+          agentId: scope.child ? scope.agentId : null,
+          policyDigest: scope.child ? approvalScope.policyDigest(state.contract) : null
+        });
         if (pending) { state.actionApproval = pending; state.expiredApprovalEventId = null; }
       } else if (record.status === 'pending' && approval.digest(event) === record.digest) {
         pending = record;
@@ -293,7 +360,10 @@ function handleApprovalAction(event, options) {
     if (denied) return { kind: 'deny', decision: result, eventId: auditEvent && auditEvent.eventId, message };
     if (rewrittenCommand) return { kind: 'rewrite', command: rewrittenCommand };
     return responseOutcome === 'context_returned' ? context(message) : none();
-    }));
+    };
+    const result = scope.child
+      ? approvalScope.update(event, options, mutate)
+      : withCoordinationLock(event.sessionId, options.dataDir, () => updateSession(event.sessionId, options.dataDir, mutate));
     orphanedHandoff = null;
     return result;
   } catch {
@@ -309,11 +379,25 @@ function handleApprovalAction(event, options) {
 function handleBeforeAction(event, options) {
   if (!options.recoveryError && event.host?.family === 'codex'
       && (event.action.name === 'request_user_input_async' || event.action.dependencyIntent)) {
-    return handleApprovalAction(event, options);
+    const scope = approvalScope.resolve(event, options);
+    if (event.action.dependencyIntent && scope.child && !scope.available) {
+      // Without PR109's child-state APIs, retain the original generic decision
+      // path. It may report a watch/default observation or deny deps=ask, but
+      // must never inspect or mutate a parent's one-time approval record.
+    } else if (event.action.name === 'request_user_input_async' && scope.child && !scope.available) {
+      let snapshot = null;
+      try { snapshot = readState(event.sessionId, options.dataDir); } catch {}
+      const record = snapshot && (snapshot.actionApproval || { eventId: snapshot.expiredApprovalEventId });
+      if (approval.isProposalQuestion(event.action, record) || approval.isProposalQuestion(event.action, null)) {
+        return handleApprovalAction(event, options);
+      }
+      // An ordinary async clarification stays on the existing read-only path
+      // when this standalone runtime has no child ledger.
+    } else return handleApprovalAction(event, options);
   }
   if (!options.recoveryError && event.host?.family === 'codex' && event.action.name === 'request_user_input') {
     let snapshot = null;
-    try { snapshot = readState(event.sessionId, options.dataDir); } catch {}
+    try { snapshot = event.agent ? approvalScope.read(event, options) : readState(event.sessionId, options.dataDir); } catch {}
     const record = snapshot && (snapshot.actionApproval || { eventId: snapshot.expiredApprovalEventId });
     if (approval.isProposalQuestion(event.action, record) || approval.isProposalQuestion(event.action, null)) {
       return handleApprovalAction(event, options);
@@ -327,6 +411,10 @@ function handleBeforeAction(event, options) {
     ? (Number.isInteger(event.action.delegationCount) ? event.action.delegationCount : 1)
     : 0;
   const evaluate = (state) => {
+    const delegationLifecycleUnproven = Boolean(event.action.delegationLifecycleUnproven)
+      && !(event.action.delegationTargetId && targetIsActive(state.delegation, event.action.delegationTargetId));
+    const actionChangesDelegation = event.action.mutability === 'delegate'
+      || delegationLifecycleUnproven || legacyDelegationProtocol;
     const action = {
       mutability: event.action.mutability,
       analysisReason: event.action.analysisReason,
@@ -339,12 +427,12 @@ function handleBeforeAction(event, options) {
       cwd: event.action.cwd,
       dependencyIntent: Boolean(event.action.dependencyIntent),
       unboundedDelegation: Boolean(event.action.unboundedDelegation),
-      delegationLifecycleUnproven: Boolean(event.action.delegationLifecycleUnproven)
+      delegationLifecycleUnproven
     };
     const summary = inspectDelegation(state.delegation, { id: event.action.id });
     action.duplicateActionId = summary.duplicateActionId;
     const result = decide({ contract: state.contract, action, delegation: summary, state });
-    if (changesDelegation && ['allow', 'report_and_defer'].includes(result.outcome)) {
+    if (actionChangesDelegation && ['allow', 'report_and_defer'].includes(result.outcome)) {
       state.delegation = applyDelegationFact(state.delegation, {
         kind: 'accepted', id: event.action.id || 'legacy:unidentified', count: delegationCount,
         completionScope: event.action.completionScope,
@@ -352,7 +440,7 @@ function handleBeforeAction(event, options) {
           : action.unboundedDelegation ? 'unbounded_execution'
           : action.delegationLifecycleUnproven ? 'unversioned_resume' : null
       });
-    } else if (changesDelegation && summary.duplicateActionId) {
+    } else if (actionChangesDelegation && summary.duplicateActionId) {
       // A later not-started event may describe this rejected attempt, not the
       // original pending execution that still owns the reservation.
       state.delegation = applyDelegationFact(state.delegation, { kind: 'duplicate_rejected', id: event.action.id });
@@ -363,11 +451,27 @@ function handleBeforeAction(event, options) {
   // Separate host processes can issue independent agent launches close together.
   // Serialize delegation reservations across Hook processes. Prompt updates
   // and completion handlers use the same lock; pure reads stay unlocked.
-  const { state, result } = options.recoveryError
-    ? evaluate(recoveryState(options.recoveryError))
-    : changesDelegation
-      ? coordinatedUpdate(event, options, evaluate)
-      : evaluate(readState(event.sessionId, options.dataDir));
+  let evaluated;
+  if (options.recoveryError) evaluated = evaluate(recoveryState(options.recoveryError));
+  else if (event.agent) {
+    const scoped = approvalScope.resolve(event, options);
+    if (!scoped.available) {
+      // Keep the standalone PR120 behavior for non-approval child tools when
+      // PR109's scoped-state APIs are absent. Preserve PR120's shared
+      // delegation budget and serialize reservations, but don't write a child
+      // contract or approval record into the parent ledger.
+      evaluated = changesDelegation
+        ? coordinatedUpdate(event, options, evaluate)
+        : evaluate(readState(event.sessionId, options.dataDir));
+    } else if (changesDelegation) evaluated = approvalScope.update(event, options, evaluate);
+    else {
+      const state = approvalScope.read(event, options);
+      if (state.storageError) return { kind: 'deny', message: 'Stop That Shit: child-scoped policy state is unavailable; action denied.' };
+      evaluated = evaluate(state);
+    }
+  } else if (changesDelegation) evaluated = coordinatedUpdate(event, options, evaluate);
+  else evaluated = evaluate(readState(event.sessionId, options.dataDir));
+  const { state, result } = evaluated;
 
   const denied = result.outcome === 'deny_and_explain' || result.outcome === 'require_user_approval';
   const responseOutcome = denied
@@ -375,6 +479,7 @@ function handleBeforeAction(event, options) {
     : result.outcome === 'report_and_defer' ? 'context_returned' : 'none';
   const auditEvent = recordDecision({
     sessionId: event.sessionId,
+    agent: event.agent,
     action: { ...event.action, delegationCount },
     contract: state.contract,
     delegation: state.delegation,
@@ -394,29 +499,45 @@ function handleBeforeAction(event, options) {
 function handleAfterAction(event, options) {
   if (event.action?.name === 'request_user_input') {
     if (event.host?.family !== 'codex') return none();
+    const scope = approvalScope.resolve(event, options);
+    if (scope.child && !scope.available) return none();
     try {
-      const snapshot = readState(event.sessionId, options.dataDir);
+      const snapshot = scope.child ? approvalScope.read(event, options) : readState(event.sessionId, options.dataDir);
+      const scopeMatches = record => scope.child
+        ? record?.scopeAgentId === scope.agentId
+        : record?.scopeAgentId === undefined;
       if (event.action.unanswered === true) {
-        if (snapshot.storageError || !approval.nativeQuestionMatches(snapshot.actionApproval, event.action)) return none();
-        return coordinatedUpdate(event, options, state => {
-          if (!state.storageError && approval.nativeQuestionMatches(state.actionApproval, event.action)) {
+        if (snapshot.storageError || !scopeMatches(snapshot.actionApproval)
+            || !approval.nativeQuestionMatches(snapshot.actionApproval, event.action)) return none();
+        const update = (state) => {
+          if (!state.storageError && scopeMatches(state.actionApproval)
+              && approval.nativeQuestionMatches(state.actionApproval, event.action)) {
             state.actionApproval = null;
           }
           return none();
-        });
+        };
+        return scope.child ? approvalScope.update(event, options, update)
+          : coordinatedUpdate(event, options, update);
       }
-      if (snapshot.storageError || !approval.nativeAnswerMatches(snapshot.actionApproval, event.action)) return none();
-      return coordinatedUpdate(event, options, state => {
-        if (!state.storageError) approval.acceptNativeAnswer(state.actionApproval, event.action);
+      if (snapshot.storageError || !scopeMatches(snapshot.actionApproval)
+          || !approval.proposalStillAllowed(snapshot.actionApproval, snapshot.contract, snapshot)
+          || !approval.nativeAnswerMatches(snapshot.actionApproval, event.action)) return none();
+      const update = (state) => {
+        if (!state.storageError && scopeMatches(state.actionApproval)
+            && approval.proposalStillAllowed(state.actionApproval, state.contract, state)) {
+          approval.acceptNativeAnswer(state.actionApproval, event.action);
+        }
         return none();
-      });
+      };
+      return scope.child ? approvalScope.update(event, options, update)
+        : coordinatedUpdate(event, options, update);
     } catch {
       // An unavailable approval ledger leaves the proposal unapproved.
       return none();
     }
   }
   if (!supportsLifecycleFacts(event)) return none();
-  return coordinatedUpdate(event, options, (state) => {
+  const update = (state) => {
     // Only a declared facts adapter may report binding or completion. A false
     // async flag can be a request parameter and never proves children joined.
     const kind = event.action.lifecycle || (event.action.completed === true ? 'joined'
@@ -428,7 +549,10 @@ function handleAfterAction(event, options) {
       state.delegation = applyDelegationFact(state.delegation, { kind: 'child_stopped', agentId });
     }
     return none();
-  });
+  };
+  const scope = approvalScope.resolve(event, options);
+  if (scope.child && scope.available) return approvalScope.update(event, options, update);
+  return coordinatedUpdate(event, options, update);
 }
 
 function handleLifecycleContext(event, options) {
@@ -459,9 +583,15 @@ function handleControlEvent(rawEvent, options = {}) {
   switch (event.kind) {
     case 'prompt.submit': {
       const command = runtimeCommand(event.prompt);
-      return command
-        ? handleRuntimeCommand(command, event, readState(event.sessionId, options.dataDir), options)
-        : coordinatedUpdate(event, options, state => handlePrompt(event, state));
+      if (command) {
+        const scope = approvalScope.resolve(event, options);
+        const state = scope.child && scope.available
+          ? approvalScope.read(event, options) : readState(event.sessionId, options.dataDir);
+        return handleRuntimeCommand(command, event, state, options);
+      }
+      return event.agent
+          ? handleScopedPrompt(event, options)
+          : coordinatedUpdate(event, options, state => handlePrompt(event, state));
     }
     case 'action.before':
       return handleBeforeAction(event, options);

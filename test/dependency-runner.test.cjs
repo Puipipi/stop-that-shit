@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { handleHook } = require('../src/hook-policy.cjs');
 const { bindingForRecord, createHandoff, cleanupCreatedHandoffs } = require('../src/dependency-handoff.cjs');
@@ -60,6 +61,55 @@ test('controlled runner pins approved directory, argv and consumes ticket once',
   const replay = spawnSync(shell, shellArgs, { cwd: other, env: { ...process.env, PLUGIN_DATA: dataDir }, encoding: 'utf8' });
   assert.notEqual(replay.status, 0);
   assert.match(replay.stderr, /unavailable|expired/);
+});
+
+test('new runner consumes a version-1 root handoff encoded with the d0 payload shape', t => {
+  const { fingerprint } = require('../src/dependency-manager.cjs');
+  const { freshState, writeState, readState } = require('../src/state.cjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-legacy-root-handoff-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const cwd = fs.realpathSync(root);
+  const managerEntry = path.join(root, 'manager.cjs');
+  const marker = path.join(root, 'manager-ran');
+  fs.writeFileSync(managerEntry, `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran')`);
+  const manager = { kind: 'node', entry: fingerprint(managerEntry), executable: fingerprint(process.execPath) };
+  const sessionId = 'legacy-root-handoff';
+  const ticket = 'c'.repeat(64);
+  const eventId = 'evt_00000000-0000-0000-0000-000000000000';
+  const actionDigest = 'a'.repeat(64);
+  const binding = { version: 1, sessionId, eventId, ticket, actionDigest,
+    argv: ['pnpm', 'install'], targetCwd: cwd, manager };
+  const canonical = value => Array.isArray(value) ? value.map(canonical)
+    : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+  const bytes = Buffer.from(JSON.stringify(canonical(binding)), 'utf8');
+  const tempRoot = path.join(fs.realpathSync(os.tmpdir()), 'stop-that-shit-handoffs');
+  fs.mkdirSync(tempRoot, { recursive: true, mode: 0o700 });
+  const handoffPath = path.join(tempRoot, `.sts-dependency-${'b'.repeat(64)}.handoff`);
+  fs.writeFileSync(handoffPath, bytes, { flag: 'wx', mode: 0o600 });
+  t.after(() => { try { fs.unlinkSync(handoffPath); } catch {} });
+  const fd = fs.openSync(handoffPath, 'r');
+  const stat = fs.fstatSync(fd, { bigint: true });
+  fs.closeSync(fd);
+  const handoff = { version: 1, path: handoffPath, tempRoot,
+    sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+    identity: { dev: stat.dev.toString(), ino: stat.ino.toString(), birthtimeNs: stat.birthtimeNs.toString() } };
+  const state = freshState();
+  state.contract = { ...state.contract, mode: 'change', level: 'guard', dependencyPolicy: 'ask' };
+  state.actionApproval = { digest: actionDigest, eventId, questionPrefix: 'prefix', question: 'question',
+    questionId: 'id', questionCallId: 'q', deniedActionId: 'a', expires: Date.now() + 30000,
+    proposalExpires: Date.now() + 30000, status: 'issued', requestedCwd: cwd, targetCwd: cwd,
+    ticket, argv: binding.argv, manager, approvedAction: { mutability: 'write', hashIntent: false,
+      affectedPaths: [], cwd }, handoff };
+  writeState(sessionId, state, root);
+
+  const runner = path.join(__dirname, '../src/dependency-runner.cjs');
+  const first = spawnSync(process.execPath, [runner, sessionId, root, ticket], { encoding: 'utf8' });
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(fs.readFileSync(marker, 'utf8'), 'ran');
+  assert.equal(readState(sessionId, root).actionApproval.status, 'issued');
+  const replay = spawnSync(process.execPath, [runner, sessionId, root, ticket], { encoding: 'utf8' });
+  assert.notEqual(replay.status, 0);
+  assert.match(replay.stderr, /already consumed|unavailable|expired/i);
 });
 
 test('approved retry does not resolve its Node bootstrap through PATH', t => {

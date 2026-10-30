@@ -80,9 +80,9 @@ function resolveWindowsPowerShell({ systemRoot = process.env.SystemRoot || proce
   return short;
 }
 
-function buildRunnerCommand({ executable, runnerPath, sessionId, dataDir, ticket, platform = process.platform, windowsPowerShellPath } = {}) {
-  const bootstrap = "require(Buffer.from(process.argv[1],'base64').toString('utf8')).run(Buffer.from(process.argv[2],'base64').toString('utf8'),Buffer.from(process.argv[3],'base64').toString('utf8'),process.argv[4])";
-  const args = [executable, '-e', bootstrap, encode(runnerPath), encode(sessionId), encode(dataDir), ticket];
+function buildRunnerCommand({ executable, runnerPath, sessionId, dataDir, ticket, agentId, platform = process.platform, windowsPowerShellPath } = {}) {
+  const bootstrap = "require(Buffer.from(process.argv[1],'base64').toString('utf8')).run(Buffer.from(process.argv[2],'base64').toString('utf8'),Buffer.from(process.argv[3],'base64').toString('utf8'),process.argv[4],Buffer.from(process.argv[5]||'','base64').toString('utf8'))";
+  const args = [executable, '-e', bootstrap, encode(runnerPath), encode(sessionId), encode(dataDir), ticket, encode(agentId || '')];
 
   if (platform === 'win32') {
     const script = `& ${args.map(quotePowerShell).join(' ')}; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE`;

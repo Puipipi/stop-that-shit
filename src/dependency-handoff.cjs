@@ -18,12 +18,15 @@ function bindingPayload(binding) {
       || !/^evt_[0-9a-f-]{36}$/.test(binding.eventId || '')
       || !/^[a-f0-9]{64}$/.test(binding.ticket || '')
       || !/^[a-f0-9]{64}$/.test(binding.actionDigest || '')
+      || binding.agentId !== undefined && binding.agentId !== null
+        && (typeof binding.agentId !== 'string' || !binding.agentId.trim() || Buffer.byteLength(binding.agentId, 'utf8') > 4096)
+      || binding.policyDigest !== undefined && binding.policyDigest !== null && !/^[a-f0-9]{64}$/.test(binding.policyDigest)
       || typeof binding.targetCwd !== 'string' || !path.isAbsolute(binding.targetCwd)
       || !Array.isArray(binding.argv) || !binding.argv.every(value => typeof value === 'string')
       || !binding.manager || typeof binding.manager !== 'object' || Array.isArray(binding.manager)) {
     throw new Error('Invalid one-time handoff binding');
   }
-  return Buffer.from(JSON.stringify(canonical({
+  const payload = {
     version: 1,
     sessionId: binding.sessionId,
     eventId: binding.eventId,
@@ -32,7 +35,10 @@ function bindingPayload(binding) {
     argv: binding.argv,
     targetCwd: binding.targetCwd,
     manager: binding.manager
-  })), 'utf8');
+  };
+  if (binding.agentId) payload.agentId = binding.agentId;
+  if (binding.policyDigest) payload.policyDigest = binding.policyDigest;
+  return Buffer.from(JSON.stringify(canonical(payload)), 'utf8');
 }
 
 function fileIdentity(stat) {
@@ -257,7 +263,8 @@ function discardHandoff(handoff) {
 
 function bindingForRecord(sessionId, record, ticket = record?.ticket) {
   if (!record || typeof record !== 'object') throw new Error('Approval record is unavailable');
-  return { sessionId, eventId: record.eventId, ticket, actionDigest: record.digest,
+  return { sessionId, agentId: record.scopeAgentId || null, policyDigest: record.policyDigest || null,
+    eventId: record.eventId, ticket, actionDigest: record.digest,
     argv: record.argv, targetCwd: record.targetCwd, manager: record.manager };
 }
 
