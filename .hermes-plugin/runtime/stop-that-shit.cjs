@@ -513,7 +513,7 @@ function handleApprovalAction(event, options) {
         }
       }
     }
-    if (result.outcome === 'allow' && event.action.name === 'request_user_input_async'
+    if (result.outcome === 'allow' && ['request_user_input_async', 'request_user_input'].includes(event.action.name)
         && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })
         && !approval.registerQuestion(record, event.action)) {
       result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
@@ -558,7 +558,7 @@ function handleApprovalAction(event, options) {
 
 function handleBeforeAction(event, options) {
   if (!options.recoveryError && event.host?.family === 'codex'
-      && (event.action.name === 'request_user_input_async' || event.action.dependencyIntent)) {
+      && (['request_user_input_async', 'request_user_input'].includes(event.action.name) || event.action.dependencyIntent)) {
     return handleApprovalAction(event, options);
   }
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
@@ -634,6 +634,17 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
+  if (event.host?.family === 'codex' && event.action?.name === 'request_user_input') {
+    try {
+      return updateSession(event.sessionId, options.dataDir, state => {
+        if (!state.storageError) approval.acceptNativeAnswer(state.actionApproval, event.action);
+        return none();
+      });
+    } catch {
+      // An unavailable approval ledger leaves the proposal unapproved.
+      return none();
+    }
+  }
   if (!supportsLifecycleFacts(event)) return none();
   return updateSession(event.sessionId, options.dataDir, (state) => {
     // Only a declared facts adapter may report binding or completion. A false
@@ -2300,6 +2311,9 @@ const PERMIT_TTL_MS = 10 * 60 * 1000;
 const YES = 'Allow this operation once';
 const NO = 'Deny this operation';
 const PROPOSAL_PREFIX = 'Allow this controlled child operation once';
+const SYNC_HEADER = 'Approval';
+const YES_DESCRIPTION = 'Authorize this operation once.';
+const NO_DESCRIPTION = 'Do not authorize this operation.';
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -2346,6 +2360,10 @@ function live(record, now = Date.now()) {
     && typeof record.deniedActionId === 'string' && record.deniedActionId.length > 0
     && (record.status === 'pending' || typeof record.questionId === 'string'
       && typeof record.questionCallId === 'string' && /^[A-Za-z0-9_-]{1,256}$/.test(record.questionCallId))
+    && (record.questionToolName === undefined || ['request_user_input_async', 'request_user_input'].includes(record.questionToolName))
+    && (record.questionToolName !== 'request_user_input' || typeof record.syncQuestionId === 'string'
+      && /^[A-Za-z0-9_-]{1,256}$/.test(record.syncQuestionId)
+      && typeof record.syncRegistrationCwd === 'string' && path.isAbsolute(record.syncRegistrationCwd))
     && Number.isSafeInteger(record.proposalExpires) && Number.isSafeInteger(record.expires)
     && (['pending', 'question'].includes(record.status) ? record.proposalExpires : record.expires) > now
     && ['pending', 'question', 'approved', 'issued', 'consumed'].includes(record.status);
@@ -2353,33 +2371,67 @@ function live(record, now = Date.now()) {
 
 function isProposalQuestion(action, record) {
   const questions = action.input?.questions;
-  return Array.isArray(questions) && questions.some(question =>
-    typeof question?.title === 'string' && (question.title.startsWith(PROPOSAL_PREFIX)
-      || record && typeof record.eventId === 'string' && question.title.includes(record.eventId)));
+  return Array.isArray(questions) && questions.some(question => {
+    const text = action.name === 'request_user_input' ? question?.question : question?.title;
+    return typeof text === 'string' && (text.startsWith(PROPOSAL_PREFIX)
+      || record && typeof record.eventId === 'string' && text.includes(record.eventId));
+  });
+}
+
+function isSyncOptions(options) {
+  return Array.isArray(options) && options.length === 2
+    && options.every((option, index) => option && typeof option === 'object' && !Array.isArray(option)
+      && Object.keys(option).length === 2 && Object.hasOwn(option, 'label') && Object.hasOwn(option, 'description')
+      && option.label === (index === 0 ? YES : NO)
+      && option.description === (index === 0 ? YES_DESCRIPTION : NO_DESCRIPTION));
 }
 
 function registerQuestion(record, action) {
   if (!live(record) || record.status !== 'pending' || !action.id
-      || !/^[A-Za-z0-9_-]{1,256}$/.test(action.id) || action.name !== 'request_user_input_async') return false;
+      || !/^[A-Za-z0-9_-]{1,256}$/.test(action.id)
+      || !['request_user_input_async', 'request_user_input'].includes(action.name)) return false;
   const questions = action.input?.questions;
-  if (!Array.isArray(questions) || questions.length !== 1 || typeof questions[0]?.title !== 'string'
-      || !questions[0].title.startsWith(record.questionPrefix) || !questions[0].title.endsWith('?')
-      || JSON.stringify(questions[0]?.options) !== JSON.stringify([YES, NO])
-      || Object.keys(action.input).length !== 1
-      || Object.keys(questions[0]).some(key => !['title', 'options'].includes(key))) return false;
-  const requested = questions[0].title.slice(record.questionPrefix.length, -1);
+  if (!Array.isArray(questions) || questions.length !== 1 || Object.keys(action.input).length !== 1) return false;
+  const question = questions[0];
+  let text;
+  if (action.name === 'request_user_input_async') {
+    if (typeof question?.title !== 'string'
+        || JSON.stringify(question?.options) !== JSON.stringify([YES, NO])
+        || Object.keys(question).some(key => !['title', 'options'].includes(key))) return false;
+    text = question.title;
+  } else {
+    if (typeof question?.id !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(question.id)
+        || question.header !== SYNC_HEADER || typeof question.question !== 'string'
+        || !isSyncOptions(question.options)
+        || Object.keys(question).sort().join(',') !== 'header,id,options,question') return false;
+    text = question.question;
+  }
+  if (!text.startsWith(record.questionPrefix) || !text.endsWith('?')) return false;
+  const requested = text.slice(record.questionPrefix.length, -1);
   if (!path.isAbsolute(requested) || /[\x00-\x1f\x7f]/.test(requested)) return false;
   let actual;
+  let registrationCwd = null;
   try {
     actual = fs.realpathSync(requested);
     if (!fs.statSync(actual).isDirectory()) return false;
+    if (action.name === 'request_user_input') {
+      registrationCwd = fs.realpathSync(action.cwd);
+      if (!fs.statSync(registrationCwd).isDirectory()) return false;
+    }
   } catch { return false; }
-  if (Buffer.byteLength(questions[0].title, 'utf8') > 8192) return false;
-  record.question = questions[0].title;
+  if (Buffer.byteLength(text, 'utf8') > 8192) return false;
+  record.question = text;
   record.requestedCwd = requested;
   record.targetCwd = actual;
   record.questionCallId = action.id;
-  record.questionId = JSON.stringify(['request_user_input_async', action.id, 0]);
+  record.questionToolName = action.name;
+  record.questionId = action.name === 'request_user_input_async'
+    ? JSON.stringify(['request_user_input_async', action.id, 0])
+    : JSON.stringify(['request_user_input', action.id, question.id]);
+  if (action.name === 'request_user_input') {
+    record.syncQuestionId = question.id;
+    record.syncRegistrationCwd = registrationCwd;
+  }
   record.status = 'question';
   return true;
 }
@@ -2397,6 +2449,7 @@ function hostQuestionText(question) {
 }
 
 function acceptReply(record, text, now = Date.now()) {
+  if (record?.questionToolName === 'request_user_input') return null;
   const match = /^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/.exec(text);
   if (!match) return null;
   let data;
@@ -2426,7 +2479,23 @@ function acceptReply(record, text, now = Date.now()) {
   return { status: 'mismatch' };
 }
 
-module.exports = { YES, NO, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, hostQuestionText };
+function acceptNativeAnswer(record, action, now = Date.now()) {
+  let cwd;
+  try { cwd = fs.realpathSync(action?.cwd); } catch { return null; }
+  if (!live(record, now) || record.status !== 'question'
+      || record.questionToolName !== 'request_user_input' || action?.name !== 'request_user_input'
+      || action.id !== record.questionCallId || action.questionId !== record.syncQuestionId
+      || cwd !== record.syncRegistrationCwd || !['Allow this operation once', 'Deny this operation'].includes(action.answer)) return null;
+  if (action.answer === YES) {
+    record.status = 'approved';
+    record.expires = now + PERMIT_TTL_MS;
+    return { status: 'approved', eventId: record.eventId, targetCwd: record.targetCwd };
+  }
+  record.status = 'consumed';
+  return { status: 'denied', eventId: record.eventId };
+}
+
+module.exports = { YES, NO, SYNC_HEADER, digest, newPending, live, isProposalQuestion, registerQuestion, acceptReply, acceptNativeAnswer, hostQuestionText };
 
 },
 "src/shell-analysis.cjs": function(module, exports, __require) {

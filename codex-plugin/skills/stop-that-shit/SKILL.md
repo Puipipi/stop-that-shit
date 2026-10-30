@@ -118,6 +118,13 @@ that an action was blocked unless an explicit mode armed the Guard and the Guard
 returned a host-specific denial. Even then, describe the host effect as
 unobserved.
 
+With Codex `change deps=ask`, a supported direct dependency command can produce
+one native approval question tied to that exact command and its proposed target
+directory. Choose the explicit allow or deny option in the question. Closing it,
+leaving it unanswered, or replying with ordinary text does not grant
+permission. An allow permits one matching retry within ten minutes; the session
+policy remains `deps=ask`.
+
 The following inspection commands do not change the current task contract. In
 Claude Code, pass the text after the namespaced slash command; in Codex, use the
 `$stop-that-shit` form shown below.

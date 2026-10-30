@@ -34,6 +34,122 @@ test('explicit card authorizes only the exact denied dependency action once',t=>
  assert.equal(before('install-3','Bash',input).hookSpecificOutput.permissionDecision,'allow');
 });
 
+test('synchronous native question registration is exact and does not accept prompt text as an answer', t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-sync-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const opt={dataDir:dir},base={session_id:'sync',turn_id:'t',cwd:process.cwd()};
+ const prompt=(text,more={})=>handleHook({...base,...more,hook_event_name:'UserPromptSubmit',prompt:text},opt);
+ const before=(id,name,input,more={})=>handleHook({...base,...more,hook_event_name:'PreToolUse',tool_name:name,tool_use_id:id,tool_input:input},opt);
+ const input={command:'pnpm install --offline --frozen-lockfile --ignore-scripts'};
+ const targetCwd=fs.mkdtempSync(path.join(os.tmpdir(),'sts-sync-target-cwd-'));
+ t.after(()=>fs.rmSync(targetCwd,{recursive:true,force:true}));
+ const {SYNC_HEADER}=require('../src/action-approval.cjs');
+ const {readState}=require('../src/state.cjs');
+ function makePendingQuestion(session) {
+  prompt('$stop-that-shit change deps=ask -- work',{session_id:session});
+  const denied=before(`install-${session}`,'Bash',input,{session_id:session});
+  const match=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denied.hookSpecificOutput.permissionDecisionReason);
+  assert.ok(match,`proposal for ${session}`);
+  const nativeQuestion={id:`dependency-approval-${session}`,header:SYNC_HEADER,
+   question:match[1].replace('<absolute canonical directory>',fs.realpathSync(targetCwd)),options:[
+    {description:'Authorize this operation once.',label:match[2]},
+    {description:'Do not authorize this operation.',label:match[3]}
+   ]};
+  return {nativeQuestion,yes:match[2],no:match[3]};
+ }
+ const {nativeQuestion,yes}=makePendingQuestion('sync');
+ assert.equal(before('sync-call-1','request_user_input',{questions:[nativeQuestion]}),null);
+ const record=readState('sync',dir).actionApproval;
+ assert.equal(record.status,'question');
+ assert.equal(record.targetCwd,fs.realpathSync(targetCwd));
+ assert.equal(record.syncRegistrationCwd,fs.realpathSync(base.cwd));
+ assert.equal(record.questionCallId,'sync-call-1');
+ assert.equal(record.questionToolName,'request_user_input');
+ assert.equal(record.syncQuestionId,'dependency-approval-sync');
+ assert.equal(record.questionId,JSON.stringify(['request_user_input','sync-call-1','dependency-approval-sync']));
+ prompt(`<send_user_message_question_reply>\n${JSON.stringify([{questionItemId:record.questionId,question:record.question,answer:yes}])}\n</send_user_message_question_reply>`);
+ assert.equal(readState('sync',dir).actionApproval.status,'question');
+ const corruptions=[
+  question=>({...question,question:`${question.question} extra`}),
+  question=>({...question,header:'Other'}),
+  question=>({...question,options:[question.options[1],question.options[0]]}),
+  question=>({...question,options:question.options.map(x=>({...x,description:'changed'}))})
+ ];
+ for (const [index,corrupt] of corruptions.entries()) {
+  const session=`sync-invalid-${index}`;
+  const {nativeQuestion:valid}=makePendingQuestion(session);
+  assert.equal(readState(session,dir).actionApproval.status,'pending');
+  const result=before(`bad-${index}`,'request_user_input',{questions:[corrupt(valid)]},{session_id:session});
+  assert.ok(result,`guard must return a denial for corruption ${index}`);
+  assert.equal(result.hookSpecificOutput.permissionDecision,'deny',`corruption ${index}`);
+  assert.equal(readState(session,dir).actionApproval.status,'pending',`state stays pending ${index}`);
+ }
+ const missingCwd='sync-missing-cwd';
+ const {nativeQuestion:forMissingCwd}=makePendingQuestion(missingCwd);
+ assert.equal(before('bad-cwd','request_user_input',{questions:[forMissingCwd]},{session_id:missingCwd,cwd:undefined}).hookSpecificOutput.permissionDecision,'deny');
+ assert.equal(readState(missingCwd,dir).actionApproval.status,'pending');
+ assert.equal(before('sync-call-duplicate','request_user_input',{questions:[nativeQuestion]}).hookSpecificOutput.permissionDecision,'deny');
+});
+
+test('only the exact synchronous tool result can approve or deny the registered proposal', t => {
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-sync-answer-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const opt={dataDir:dir},base={session_id:'sync-answer',turn_id:'t',cwd:process.cwd()};
+ const prompt=text=>handleHook({...base,hook_event_name:'UserPromptSubmit',prompt:text},opt);
+ const before=(id,name,input,more={})=>handleHook({...base,...more,hook_event_name:'PreToolUse',tool_name:name,tool_use_id:id,tool_input:input},opt);
+ const after=(id,question,answers,more={})=>handleHook({...base,...more,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:id,tool_input:{questions:[question]},tool_response:answers},opt);
+ prompt('$stop-that-shit change deps=ask -- work');
+ const input={command:'pnpm install --offline --frozen-lockfile --ignore-scripts'};
+ const denial=before('install','Bash',input);
+ const match=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denial.hookSpecificOutput.permissionDecisionReason);
+ const question={id:'sync-question',header:require('../src/action-approval.cjs').SYNC_HEADER,
+  question:match[1].replace('<absolute canonical directory>',fs.realpathSync(base.cwd)),
+  options:[{label:match[2],description:'Authorize this operation once.'},{label:match[3],description:'Do not authorize this operation.'}]};
+ assert.equal(before('native-call','request_user_input',{questions:[question]}),null);
+ const {readState}=require('../src/state.cjs');
+ const state=()=>readState(base.session_id,dir).actionApproval;
+ for (const result of [
+  {answers:{}},
+  {answers:{other:{answers:[match[2]]}}},
+  {answers:{'sync-question':{answers:[]}}},
+  {answers:{'sync-question':{answers:[match[2],match[3]]}}},
+  {answers:{'sync-question':{answers:['ordinary text']}}},
+  {answers:{'sync-question':{answers:[match[2]]},extra:{answers:[match[2]]}}},
+  {answers:{'sync-question':{answers:[match[2]]}},extra:'ignored no'}
+ ]) {
+  after('native-call',question,result);
+  assert.equal(state().status,'question');
+ }
+ const mismatchedQuestion={...question,id:'other-question'};
+ after('native-call',mismatchedQuestion,{answers:{'other-question':{answers:[match[2]]}}});
+ assert.equal(state().status,'question');
+ const {toControlEvent}=require('../src/adapters/codex-hooks.cjs');
+ const {handleControlEvent}=require('../src/controller.cjs');
+ const codexPost=toControlEvent({...base,hook_event_name:'PostToolUse',tool_name:'request_user_input',tool_use_id:'native-call',
+  tool_input:{questions:[question]},tool_response:{answers:{'sync-question':{answers:[match[2]]}}}});
+ for (const event of [{...codexPost,host:{family:'claude'}},{...codexPost,host:undefined}]) {
+  handleControlEvent(event,opt);
+  assert.equal(state().status,'question');
+ }
+ after('wrong-tool-call',question,{answers:{'sync-question':{answers:[match[2]]}}});
+ assert.equal(state().status,'question');
+ after('native-call',question,{answers:{'sync-question':{answers:[match[2]]}}},{cwd:os.tmpdir()});
+ assert.equal(state().status,'question');
+ after('native-call',question,JSON.stringify({answers:{'sync-question':{answers:[match[2]]}}}));
+ assert.equal(state().status,'approved');
+ assert.equal(before('retry','Bash',input).hookSpecificOutput.permissionDecision,'allow');
+
+ base.session_id='sync-deny-answer';
+ prompt('$stop-that-shit change deps=ask -- work');
+ const denied=before('install','Bash',input);
+ const denyMatch=/Approval question: (.+)\nApproval options: (.+) \| (.+)/.exec(denied.hookSpecificOutput.permissionDecisionReason);
+ const denyQuestion={...question,id:'sync-deny-question',question:denyMatch[1].replace('<absolute canonical directory>',fs.realpathSync(base.cwd)),options:[
+  {label:denyMatch[2],description:'Authorize this operation once.'},{label:denyMatch[3],description:'Do not authorize this operation.'}
+ ]};
+ before('native-deny-call','request_user_input',{questions:[denyQuestion]});
+ after('native-deny-call',denyQuestion,{answers:{'sync-deny-question':{answers:[denyMatch[3]]}}});
+ assert.equal(state().status,'consumed');
+ assert.match(before('retry','Bash',input).hookSpecificOutput.permissionDecisionReason,/DEPENDENCY_NOT_AUTHORIZED/);
+});
+
 test('approval rejects forged, changed, replayed and unsafe operations',t=>{
  const dataDir=fs.mkdtempSync(path.join(os.tmpdir(),'sts-approval-'));t.after(()=>fs.rmSync(dataDir,{recursive:true,force:true}));const options={dataDir};const cwd=process.cwd();
  const base={session_id:'s',turn_id:'t',cwd};const prompt=(text,more={})=>handleHook({...base,...more,hook_event_name:'UserPromptSubmit',prompt:text},options);

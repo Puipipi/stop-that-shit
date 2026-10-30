@@ -234,7 +234,7 @@ function handleApprovalAction(event, options) {
         }
       }
     }
-    if (result.outcome === 'allow' && event.action.name === 'request_user_input_async'
+    if (result.outcome === 'allow' && ['request_user_input_async', 'request_user_input'].includes(event.action.name)
         && approval.isProposalQuestion(event.action, record || { eventId: state.expiredApprovalEventId })
         && !approval.registerQuestion(record, event.action)) {
       result = { outcome: 'deny_and_explain', family: 'S', reasonCode: 'APPROVAL_QUESTION_INVALID',
@@ -279,7 +279,7 @@ function handleApprovalAction(event, options) {
 
 function handleBeforeAction(event, options) {
   if (!options.recoveryError && event.host?.family === 'codex'
-      && (event.action.name === 'request_user_input_async' || event.action.dependencyIntent)) {
+      && (['request_user_input_async', 'request_user_input'].includes(event.action.name) || event.action.dependencyIntent)) {
     return handleApprovalAction(event, options);
   }
   const legacyDelegationProtocol = !supportsLifecycleFacts(event)
@@ -355,6 +355,17 @@ function handleBeforeAction(event, options) {
 }
 
 function handleAfterAction(event, options) {
+  if (event.host?.family === 'codex' && event.action?.name === 'request_user_input') {
+    try {
+      return updateSession(event.sessionId, options.dataDir, state => {
+        if (!state.storageError) approval.acceptNativeAnswer(state.actionApproval, event.action);
+        return none();
+      });
+    } catch {
+      // An unavailable approval ledger leaves the proposal unapproved.
+      return none();
+    }
+  }
   if (!supportsLifecycleFacts(event)) return none();
   return updateSession(event.sessionId, options.dataDir, (state) => {
     // Only a declared facts adapter may report binding or completion. A false
