@@ -231,15 +231,38 @@ test('Windows runner wrapper termination stops its owned grandchild tree', async
   const { spawn } = require('node:child_process');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-job-cancel-'));
   const ownedPids = [];
+  let wrapper;
+  let wrapperExit = null;
+  let wrapperSpawnError = null;
+  const wrapperStderr = [];
+  const maxWrapperStderrBytes = 4096;
+  let resolveWrapperClosed;
+  const wrapperClosed = new Promise(resolve => { resolveWrapperClosed = resolve; });
+  const closeWrapper = async () => {
+    if (!wrapper) return;
+    if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill();
+    let timeout;
+    const exit = await Promise.race([
+      wrapperClosed.then(value => { clearTimeout(timeout); return value; }),
+      new Promise(resolve => { timeout = setTimeout(() => resolve(null), 5000); })
+    ]);
+    if (!exit) throw new Error('timed out waiting for owned Windows wrapper to close');
+    return exit;
+  };
   const isProcessAlive = pid => {
     try { process.kill(pid, 0); return true; }
     catch (error) { if (error.code === 'ESRCH') return false; if (error.code === 'EPERM') return true; throw error; }
   };
   t.after(async () => {
+    // Always close the exact wrapper spawned by this test. This also closes its
+    // non-inheritable Job Object handle so the owned runner tree cannot leak.
+    let closeError;
+    try { await closeWrapper(); } catch (error) { closeError = error; }
     fs.writeFileSync(path.join(root, 'cleanup'), 'stop');
     const deadline = Date.now() + 5000;
     while (ownedPids.some(isProcessAlive) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
     fs.rmSync(root, { recursive: true, force: true });
+    if (closeError) throw closeError;
   });
   const runnerPath = path.join(root, 'runner.cjs');
   const heartbeat = path.join(root, 'grandchild-heartbeat');
@@ -270,28 +293,52 @@ test('Windows runner wrapper termination stops its owned grandchild tree', async
     sessionId: 'job-cancel-test', dataDir: root, ticket: 'e'.repeat(64) });
   const match = /^(\S+) -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command);
   assert.ok(match, 'expected the generated Windows PowerShell wrapper');
-  const wrapper = spawn(match[1], ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', match[2]], {
-    windowsHide: true, stdio: 'ignore'
+  wrapper = spawn(match[1], ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', match[2]], {
+    windowsHide: true, stdio: ['ignore', 'ignore', 'pipe']
+  });
+  wrapper.on('error', error => { wrapperSpawnError = error.message; });
+  let wrapperStderrBytes = 0;
+  wrapper.stderr.on('data', chunk => {
+    wrapperStderr.push(chunk);
+    wrapperStderrBytes += chunk.length;
+    while (wrapperStderrBytes > maxWrapperStderrBytes) {
+      const first = wrapperStderr[0];
+      const excess = wrapperStderrBytes - maxWrapperStderrBytes;
+      if (first.length <= excess) {
+        wrapperStderr.shift();
+        wrapperStderrBytes -= first.length;
+      } else {
+        wrapperStderr[0] = first.subarray(excess);
+        wrapperStderrBytes -= excess;
+      }
+    }
+  });
+  wrapper.once('close', (code, signal) => {
+    wrapperExit = { code, signal };
+    resolveWrapperClosed(wrapperExit);
   });
   const waitForFile = async file => {
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 300; i++) {
       if (fs.existsSync(file)) return;
+      if (wrapperSpawnError) throw new Error(`wrapper failed to spawn: ${wrapperSpawnError}`);
+      if (wrapperExit) {
+        const stderr = Buffer.concat(wrapperStderr).toString('utf8').trim().slice(-2000);
+        throw new Error(`wrapper exited before ${path.basename(file)} (code=${wrapperExit.code}, signal=${wrapperExit.signal})${stderr ? `; stderr=${stderr}` : ''}`);
+      }
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    assert.fail(`timed out waiting for ${path.basename(file)}`);
+    const stderr = Buffer.concat(wrapperStderr).toString('utf8').trim().slice(-2000);
+    assert.fail(`timed out waiting for ${path.basename(file)} (wrapper still running; code=${wrapper.exitCode}, signal=${wrapper.signalCode})${stderr ? `; stderr=${stderr}` : ''}`);
   };
-  await waitForFile(heartbeat);
   await waitForFile(path.join(root, 'runner-pid'));
-  await waitForFile(path.join(root, 'grandchild-pid'));
   const runnerPid = Number(fs.readFileSync(path.join(root, 'runner-pid'), 'utf8'));
+  ownedPids.push(runnerPid);
+  await waitForFile(path.join(root, 'grandchild-pid'));
   const grandchildPid = Number(fs.readFileSync(path.join(root, 'grandchild-pid'), 'utf8'));
-  ownedPids.push(runnerPid, grandchildPid);
-  const wrapperClosed = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('timed out waiting for wrapper termination')), 5000);
-    wrapper.once('close', (...args) => { clearTimeout(timeout); resolve(args); });
-  });
+  ownedPids.push(grandchildPid);
+  await waitForFile(heartbeat);
   wrapper.kill();
-  await wrapperClosed;
+  await closeWrapper();
   const deadline = Date.now() + 5000;
   while (ownedPids.some(isProcessAlive) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(isProcessAlive(runnerPid), false, 'runner process remained alive after wrapper termination');
