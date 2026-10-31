@@ -16,6 +16,16 @@ function quotePowerShell(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+function windowsJobGuardPrelude() {
+  const guardPath = Buffer.from(path.join(__dirname, 'windows-job-guard.cs'), 'utf8').toString('base64');
+  return [
+    `$jobPath = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${guardPath}'))`,
+    '$jobReady = $false',
+    'try { $jobSource = [IO.File]::ReadAllText($jobPath); Add-Type -TypeDefinition $jobSource -ErrorAction Stop | Out-Null; $jobReady = [StssRunnerJob]::AttachCurrentProcess() } catch { $jobReady = $false }',
+    'if (-not $jobReady) { [Console]::Error.WriteLine("Stop That Shit: Windows process-tree containment is unavailable."); exit 1 }'
+  ].join('; ');
+}
+
 function isShellNeutralWindowsPath(value) {
   return /^[A-Za-z]:\\[A-Za-z0-9_.~\\-]+$/.test(String(value || ''));
 }
@@ -85,7 +95,7 @@ function buildRunnerCommand({ executable, runnerPath, sessionId, dataDir, ticket
   const args = [executable, '-e', bootstrap, encode(runnerPath), encode(sessionId), encode(dataDir), ticket, encode(agentId || '')];
 
   if (platform === 'win32') {
-    const script = `& ${args.map(quotePowerShell).join(' ')}; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE`;
+    const script = `${windowsJobGuardPrelude()}; & ${args.map(quotePowerShell).join(' ')}; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE`;
     const encodedScript = Buffer.from(script, 'utf16le').toString('base64');
     // The absolute system path is either shell-neutral itself or a verified
     // 8.3 alias. No executable from PATH launches the approved runner.

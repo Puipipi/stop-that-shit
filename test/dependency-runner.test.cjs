@@ -225,6 +225,175 @@ test('runner launcher preserves paths with spaces, apostrophes and non-ASCII cha
   }
 });
 
+test('Windows runner wrapper termination stops its owned grandchild tree', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows Job Object behavior');
+  const { buildRunnerCommand } = require('../src/runner-command.cjs');
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-job-cancel-'));
+  const ownedPids = [];
+  const isProcessAlive = pid => {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; if (error.code === 'EPERM') return true; throw error; }
+  };
+  t.after(async () => {
+    fs.writeFileSync(path.join(root, 'cleanup'), 'stop');
+    const deadline = Date.now() + 5000;
+    while (ownedPids.some(isProcessAlive) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const runnerPath = path.join(root, 'runner.cjs');
+  const heartbeat = path.join(root, 'grandchild-heartbeat');
+  const cleanup = path.join(root, 'cleanup');
+  const grandchildSource = `
+    const fs = require('node:fs');
+    const heartbeat = process.argv[1];
+    const cleanup = process.argv[2];
+    let count = 0;
+    const timer = setInterval(() => {
+      if (fs.existsSync(cleanup)) { clearInterval(timer); process.exit(0); }
+      fs.writeFileSync(heartbeat, String(++count));
+    }, 50);
+  `;
+  fs.writeFileSync(runnerPath, `
+    const fs = require('node:fs');
+    const { spawn } = require('node:child_process');
+    module.exports.run = () => {
+      fs.writeFileSync(${JSON.stringify(path.join(root, 'runner-pid'))}, String(process.pid));
+      const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSource)}, ${JSON.stringify(heartbeat)}, ${JSON.stringify(cleanup)}], { windowsHide: true, stdio: 'ignore' });
+      fs.writeFileSync(${JSON.stringify(path.join(root, 'grandchild-pid'))}, String(grandchild.pid));
+      const timer = setInterval(() => {
+        if (fs.existsSync(${JSON.stringify(cleanup)})) { clearInterval(timer); process.exit(0); }
+      }, 50);
+    };
+  `);
+  const command = buildRunnerCommand({ executable: process.execPath, runnerPath,
+    sessionId: 'job-cancel-test', dataDir: root, ticket: 'e'.repeat(64) });
+  const match = /^(\S+) -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command);
+  assert.ok(match, 'expected the generated Windows PowerShell wrapper');
+  const wrapper = spawn(match[1], ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', match[2]], {
+    windowsHide: true, stdio: 'ignore'
+  });
+  const waitForFile = async file => {
+    for (let i = 0; i < 100; i++) {
+      if (fs.existsSync(file)) return;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.fail(`timed out waiting for ${path.basename(file)}`);
+  };
+  await waitForFile(heartbeat);
+  await waitForFile(path.join(root, 'runner-pid'));
+  await waitForFile(path.join(root, 'grandchild-pid'));
+  const runnerPid = Number(fs.readFileSync(path.join(root, 'runner-pid'), 'utf8'));
+  const grandchildPid = Number(fs.readFileSync(path.join(root, 'grandchild-pid'), 'utf8'));
+  ownedPids.push(runnerPid, grandchildPid);
+  const wrapperClosed = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('timed out waiting for wrapper termination')), 5000);
+    wrapper.once('close', (...args) => { clearTimeout(timeout); resolve(args); });
+  });
+  wrapper.kill();
+  await wrapperClosed;
+  const deadline = Date.now() + 5000;
+  while (ownedPids.some(isProcessAlive) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(isProcessAlive(runnerPid), false, 'runner process remained alive after wrapper termination');
+  assert.equal(isProcessAlive(grandchildPid), false, 'grandchild process remained alive after wrapper termination');
+  const before = fs.readFileSync(heartbeat, 'utf8');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const after = fs.readFileSync(heartbeat, 'utf8');
+  assert.equal(after, before, 'grandchild continued writing after wrapper termination');
+});
+
+test('Windows runner fails closed when process-tree containment cannot attach', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows Job Object behavior');
+  const { spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-job-fail-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const isolatedSource = path.join(root, 'src');
+  fs.mkdirSync(isolatedSource);
+  const commandBuilderPath = path.join(isolatedSource, 'runner-command.cjs');
+  const commandBuilder = fs.readFileSync(path.join(__dirname, '../src/runner-command.cjs'), 'utf8');
+  const failedAttachSource = 'using System; public static class StssRunnerJob { public static bool AttachCurrentProcess() { return false; } }';
+  const failedAttachPath = path.join(isolatedSource, 'windows-job-guard.cs');
+  fs.writeFileSync(failedAttachPath, failedAttachSource);
+  fs.writeFileSync(commandBuilderPath, commandBuilder);
+  const marker = path.join(root, 'runner-started');
+  const runnerPath = path.join(root, 'runner.cjs');
+  fs.writeFileSync(runnerPath, `module.exports.run = () => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started');`);
+  const { buildRunnerCommand } = require(commandBuilderPath);
+  const command = buildRunnerCommand({ executable: process.execPath, runnerPath,
+    sessionId: 'job-fail-test', dataDir: root, ticket: 'f'.repeat(64) });
+  const match = /^(\S+) -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command);
+  assert.ok(match, 'expected the generated Windows PowerShell wrapper');
+  const result = spawnSync(match[1], ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', match[2]], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000
+  });
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(result.stderr, /process-tree containment is unavailable/i);
+  assert.equal(fs.existsSync(marker), false, 'runner started despite failed job assignment');
+});
+
+test('Windows wrapper preserves runner exit status and closes its job on normal completion', async t => {
+  if (process.platform !== 'win32') return t.skip('Windows Job Object behavior');
+  const { buildRunnerCommand } = require('../src/runner-command.cjs');
+  const { spawnSync } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'sts-runner-job-exit-'));
+  let grandchildPid = 0;
+  const cleanup = path.join(root, 'cleanup');
+  const pidPath = path.join(root, 'grandchild-pid');
+  const heartbeat = path.join(root, 'heartbeat');
+  const ready = path.join(root, 'ready');
+  const isProcessAlive = pid => {
+    try { process.kill(pid, 0); return true; }
+    catch (error) { if (error.code === 'ESRCH') return false; if (error.code === 'EPERM') return true; throw error; }
+  };
+  t.after(async () => {
+    fs.writeFileSync(cleanup, 'stop');
+    const deadline = Date.now() + 5000;
+    while (grandchildPid && isProcessAlive(grandchildPid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const grandchildSource = `
+    const fs = require('node:fs');
+    const [ready, heartbeat, cleanup] = process.argv.slice(1);
+    fs.writeFileSync(ready, 'ready');
+    let count = 0;
+    const timer = setInterval(() => {
+      if (fs.existsSync(cleanup)) { clearInterval(timer); process.exit(0); }
+      fs.writeFileSync(heartbeat, String(++count));
+    }, 50);
+  `;
+  const managerPath = path.join(root, 'manager.cjs');
+  fs.writeFileSync(managerPath, `
+    const { spawn } = require('node:child_process');
+    const child = spawn(process.execPath, ['-e', ${JSON.stringify(grandchildSource)}, ${JSON.stringify(ready)}, ${JSON.stringify(heartbeat)}, ${JSON.stringify(cleanup)}], { windowsHide: true, stdio: 'ignore' });
+    require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(child.pid));
+    child.unref();
+    const poll = setInterval(() => {
+      if (require('node:fs').existsSync(${JSON.stringify(ready)})) { clearInterval(poll); process.exit(23); }
+    }, 20);
+  `);
+  const runnerPath = path.join(root, 'runner.cjs');
+  fs.writeFileSync(runnerPath, `
+    const { spawn } = require('node:child_process');
+    module.exports.run = () => {
+      const manager = spawn(process.execPath, [${JSON.stringify(managerPath)}], { windowsHide: true, stdio: 'ignore' });
+      manager.once('exit', code => { process.exitCode = Number.isInteger(code) ? code : 1; });
+    };
+  `);
+  const command = buildRunnerCommand({ executable: process.execPath, runnerPath,
+    sessionId: 'job-normal-exit-test', dataDir: root, ticket: 'a'.repeat(64) });
+  const match = /^(\S+) -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command);
+  assert.ok(match, 'expected the generated Windows PowerShell wrapper');
+  const result = spawnSync(match[1], ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', match[2]], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000
+  });
+  if (fs.existsSync(pidPath)) grandchildPid = Number(fs.readFileSync(pidPath, 'utf8'));
+  assert.equal(result.status, 23, result.stderr);
+  assert.ok(fs.existsSync(ready), 'grandchild did not start before the manager exited');
+  const deadline = Date.now() + 5000;
+  while (isProcessAlive(grandchildPid) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(isProcessAlive(grandchildPid), false, 'grandchild remained after normal wrapper completion');
+});
+
 test('runner rejects an executable changed after approval without starting it', t => {
   const { fingerprint } = require('../src/dependency-manager.cjs');
   const { freshState, writeState } = require('../src/state.cjs');
